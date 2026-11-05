@@ -92,10 +92,26 @@ def extract_auth_code(url: str, expected_state: str) -> str | None:
     return (values.get("auth_code") or values.get("code") or [None])[0]
 
 
+def manual_auth_code(login_url: str, expected_state: str) -> str:
+    """Print the login URL and accept a redirect URL/code in a headless shell."""
+    print("Open this Fyers login URL in a browser on your local machine:")
+    print(login_url)
+    entered = input("Paste the full redirect URL or auth_code here: ").strip()
+    if not entered:
+        raise RuntimeError("No auth_code or redirect URL was provided")
+
+    candidate_url = entered
+    if "auth_code=" in entered and "://" not in entered:
+        candidate_url = f"https://localhost/?{entered}"
+    return extract_auth_code(candidate_url, expected_state) or entered
+
+
 def browser_auth_code(login_url: str, expected_state: str) -> str:
-    """Open Chromium and wait for Fyers to redirect with auth_code."""
+    """Use Chromium or a manual paste flow to obtain auth_code."""
     timeout = int(os.getenv("auth_timeout_seconds", "300"))
     headless = os.getenv("browser_headless", "false").lower() == "true"
+    if headless or (os.name != "nt" and not os.getenv("DISPLAY")):
+        return manual_auth_code(login_url, expected_state)
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
