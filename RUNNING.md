@@ -27,10 +27,11 @@ Install the dependencies, then run the authentication helper:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe auth.py
 ```
 
-The script opens Chrome or Edge. Complete the Fyers login and OTP manually;
+The script opens Chromium. Complete the Fyers login and OTP manually;
 the script captures `auth_code` from the redirect URL, generates both tokens,
 and caches them at `~/.fyers/token.json`. Add `pin=...` to `.env` to allow the
 script to refresh an expired access token automatically. Fyers refresh tokens

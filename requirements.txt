@@ -2,5 +2,5 @@ fastapi>=0.115,<1
 fyers-apiv3>=3.1,<4
 python-dotenv>=1.0,<2
 requests>=2.31,<3
-selenium>=4.25,<5
+playwright>=1.48,<2
 uvicorn[standard]>=0.30,<1

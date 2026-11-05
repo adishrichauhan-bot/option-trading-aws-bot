@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -17,9 +18,8 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 from dotenv import load_dotenv
 from fyers_apiv3 import fyersModel
-from selenium import webdriver
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.support.ui import WebDriverWait
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import sync_playwright
 
 
 load_dotenv()
@@ -93,33 +93,32 @@ def extract_auth_code(url: str, expected_state: str) -> str | None:
 
 
 def browser_auth_code(login_url: str, expected_state: str) -> str:
-    """Open a visible browser and wait for Fyers to redirect with auth_code."""
-    driver: Any = None
-    try:
+    """Open Chromium and wait for Fyers to redirect with auth_code."""
+    timeout = int(os.getenv("auth_timeout_seconds", "300"))
+    headless = os.getenv("browser_headless", "false").lower() == "true"
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=headless)
+        page = browser.new_page()
         try:
-            driver = webdriver.Chrome()
-        except WebDriverException as chrome_error:
             try:
-                driver = webdriver.Edge()
-            except WebDriverException as edge_error:
-                raise RuntimeError(
-                    "Could not start Chrome or Edge. Install a supported browser "
-                    "and ensure Selenium can manage its driver."
-                ) from edge_error
+                page.goto(login_url, wait_until="domcontentloaded")
+            except PlaywrightError:
+                # A registered redirect URI may not serve a page. The URL can
+                # still contain the auth_code after the redirect.
+                pass
 
-        driver.get(login_url)
-        timeout = int(os.getenv("auth_timeout_seconds", "300"))
-        print("Complete Fyers login/OTP in the browser window.")
-        print(f"Waiting up to {timeout} seconds for the redirect...")
-
-        def read_code(_: Any) -> str | bool:
-            return extract_auth_code(driver.current_url, expected_state) or False
-
-        code = WebDriverWait(driver, timeout, poll_frequency=1).until(read_code)
-        return str(code)
-    finally:
-        if driver is not None:
-            driver.quit()
+            print("Complete Fyers login/OTP in the browser window.")
+            print(f"Waiting up to {timeout} seconds for the redirect...")
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                code = extract_auth_code(page.url, expected_state)
+                if code:
+                    return code
+                page.wait_for_timeout(1000)
+            raise TimeoutError("Timed out waiting for the Fyers auth redirect")
+        finally:
+            browser.close()
 
 
 def build_client(client_id: str, access_token: str) -> Any:
