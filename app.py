@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+
+
+load_dotenv()
 
 
 INDEXES: dict[str, dict[str, str]] = {
@@ -70,26 +76,44 @@ def _option_type(option: dict[str, Any]) -> str | None:
 
 def _atm_options(response: dict[str, Any], spot: float) -> dict[str, dict[str, Any]]:
     options = _rows(response, "options_chain", "optionsChain", "d", "data")
-    candidates: list[tuple[float, str, dict[str, Any]]] = []
+    strikes = {
+        strike
+        for option in options
+        if (strike := _number(_value(option, "strike_price", "strikePrice", "strike"))) is not None
+        and _option_type(option) in {"CE", "PE"}
+    }
+    if not strikes:
+        return {}
+
+    atm_strike = min(strikes, key=lambda strike: abs(strike - spot))
+    result: dict[str, dict[str, Any]] = {}
     for option in options:
         strike = _number(_value(option, "strike_price", "strikePrice", "strike"))
         kind = _option_type(option)
-        if strike is not None and kind:
-            candidates.append((abs(strike - spot), kind, option))
-
-    result: dict[str, dict[str, Any]] = {}
-    for _, kind, option in sorted(candidates, key=lambda item: item[0]):
-        if kind in result:
+        if strike != atm_strike or kind is None:
             continue
         result[kind] = {
             "symbol": option.get("symbol"),
-            "strike": _number(_value(option, "strike_price", "strikePrice", "strike")),
+            "strike": strike,
             "ltp": _number(_value(option, "ltp", "lp", "last_price")),
+            "change": _number(_value(option, "ltpch", "change")),
+            "change_percent": _number(_value(option, "ltpchp", "change_percent")),
             "bid": _number(_value(option, "bid", "bid_price", "bidPrice")),
             "ask": _number(_value(option, "ask", "ask_price", "askPrice")),
-            "raw": option,
+            "open_interest": _number(_value(option, "oi", "open_interest")),
+            "implied_volatility": _number(_value(option, "iv", "implied_volatility")),
         }
     return result
+
+
+def _cached_access_token() -> str | None:
+    path = Path(os.path.expanduser(os.getenv("token_file", "~/.fyers/token.json")))
+    try:
+        tokens = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    return str(token) if token else None
 
 
 class FyersMarketData:
@@ -116,7 +140,7 @@ class FyersMarketData:
             if spot is None:
                 raise ValueError(f"No last traded price returned for {index['symbol']}")
             chain_response = self.client.optionchain(
-                data={"symbol": index["symbol"], "strikecount": strike_count, "timestamp": ""}
+                data={"symbol": index["symbol"], "strikecount": strike_count}
             )
             output["indices"][name] = {
                 "name": index["name"],
@@ -145,10 +169,13 @@ def market_data(
     names = [item.strip().upper() for item in indices.split(",") if item.strip()]
     if not names or any(name not in INDEXES for name in names):
         raise HTTPException(status_code=400, detail="indices must contain NIFTY and/or SENSEX")
-    client_id = os.getenv("FYERS_CLIENT_ID")
-    access_token = os.getenv("FYERS_ACCESS_TOKEN")
+    client_id = os.getenv("FYERS_CLIENT_ID") or os.getenv("client_id")
+    access_token = os.getenv("FYERS_ACCESS_TOKEN") or _cached_access_token()
     if not client_id or not access_token:
-        raise HTTPException(status_code=500, detail="FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN are required")
+        raise HTTPException(
+            status_code=500,
+            detail="Run auth.py first or provide FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN",
+        )
     try:
         return FyersMarketData(client_id, access_token).fetch(names, strike_count)
     except Exception as exc:
