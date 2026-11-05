@@ -1,0 +1,242 @@
+"""Fyers v3 authentication with browser login, token caching, and refresh.
+
+The browser login and OTP remain interactive only when no usable cached token
+exists. Tokens are stored outside the repository by default at
+``~/.fyers/token.json``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlsplit
+
+import requests
+from dotenv import load_dotenv
+from fyers_apiv3 import fyersModel
+from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.support.ui import WebDriverWait
+
+
+load_dotenv()
+
+TOKEN_ENDPOINT = "https://api-t1.fyers.in/api/v3/validate-authcode"
+REFRESH_ENDPOINT = "https://api-t1.fyers.in/api/v3/validate-refresh-token"
+
+
+def required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required .env variable: {name}")
+    return value
+
+
+def token_path() -> Path:
+    configured = os.getenv("token_file", "~/.fyers/token.json")
+    return Path(os.path.expanduser(configured))
+
+
+def read_tokens() -> dict[str, str]:
+    """Read cached credentials without printing or exposing their values."""
+    try:
+        data = json.loads(token_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_tokens(tokens: dict[str, str]) -> None:
+    """Atomically cache tokens outside the repository."""
+    path = token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+    temporary.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        # Windows does not consistently support Unix file modes.
+        pass
+
+
+def app_id_hash(client_id: str, secret_key: str) -> str:
+    return hashlib.sha256(f"{client_id}:{secret_key}".encode("utf-8")).hexdigest()
+
+
+def response_is_ok(response: Any) -> bool:
+    return isinstance(response, dict) and (
+        response.get("s") == "ok" or response.get("code") in {200, 201}
+    )
+
+
+def extract_auth_code(url: str, expected_state: str) -> str | None:
+    """Extract and validate auth_code from a Fyers redirect URL."""
+    parsed = urlsplit(url)
+    values: dict[str, list[str]] = parse_qs(parsed.query, keep_blank_values=True)
+    for key, value in parse_qs(parsed.fragment, keep_blank_values=True).items():
+        values.setdefault(key, value)
+
+    error = values.get("error", [""])[0]
+    if error:
+        description = values.get("description", [error])[0]
+        raise RuntimeError(f"Fyers login failed: {description}")
+
+    returned_state = values.get("state", [None])[0]
+    if returned_state and returned_state != expected_state:
+        raise RuntimeError("Fyers redirect state does not match the .env state")
+
+    return (values.get("auth_code") or values.get("code") or [None])[0]
+
+
+def browser_auth_code(login_url: str, expected_state: str) -> str:
+    """Open a visible browser and wait for Fyers to redirect with auth_code."""
+    driver: Any = None
+    try:
+        try:
+            driver = webdriver.Chrome()
+        except WebDriverException as chrome_error:
+            try:
+                driver = webdriver.Edge()
+            except WebDriverException as edge_error:
+                raise RuntimeError(
+                    "Could not start Chrome or Edge. Install a supported browser "
+                    "and ensure Selenium can manage its driver."
+                ) from edge_error
+
+        driver.get(login_url)
+        timeout = int(os.getenv("auth_timeout_seconds", "300"))
+        print("Complete Fyers login/OTP in the browser window.")
+        print(f"Waiting up to {timeout} seconds for the redirect...")
+
+        def read_code(_: Any) -> str | bool:
+            return extract_auth_code(driver.current_url, expected_state) or False
+
+        code = WebDriverWait(driver, timeout, poll_frequency=1).until(read_code)
+        return str(code)
+    finally:
+        if driver is not None:
+            driver.quit()
+
+
+def build_client(client_id: str, access_token: str) -> Any:
+    return fyersModel.FyersModel(
+        token=access_token,
+        is_async=False,
+        client_id=client_id,
+        log_path="",
+    )
+
+
+def access_token_works(client_id: str, access_token: str) -> bool:
+    """Validate the cached token with a lightweight profile request."""
+    try:
+        return response_is_ok(build_client(client_id, access_token).get_profile())
+    except Exception:
+        return False
+
+
+def exchange_auth_code(app_session: Any, auth_code: str) -> dict[str, str]:
+    app_session.set_token(auth_code)
+    response = app_session.generate_token()
+    if not response_is_ok(response) and "access_token" not in response:
+        raise RuntimeError(f"Fyers authorization-code exchange failed: {response}")
+    tokens = {
+        key: str(response[key])
+        for key in ("access_token", "refresh_token")
+        if response.get(key)
+    }
+    if "access_token" not in tokens:
+        raise RuntimeError("Fyers authorization response did not contain access_token")
+    return tokens
+
+
+def refresh_access_token(
+    client_id: str, secret_key: str, refresh_token: str, pin: str
+) -> dict[str, str]:
+    """Use Fyers' refresh endpoint and retain the existing refresh token."""
+    response = requests.post(
+        REFRESH_ENDPOINT,
+        json={
+            "grant_type": "refresh_token",
+            "appIdHash": app_id_hash(client_id, secret_key),
+            "refresh_token": refresh_token,
+            "pin": pin,
+        },
+        headers={"Content-Type": "application/json", "User-Agent": "fyers-auth-mvp/1.0"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not response_is_ok(data) and "access_token" not in data:
+        raise RuntimeError(f"Fyers refresh failed: {data}")
+    if not data.get("access_token"):
+        raise RuntimeError("Fyers refresh response did not contain access_token")
+    return {
+        "access_token": str(data["access_token"]),
+        "refresh_token": str(data.get("refresh_token", refresh_token)),
+    }
+
+
+def main() -> Any:
+    redirect_uri = required_env("redirect_uri")
+    client_id = required_env("client_id")
+    secret_key = required_env("secret_key")
+    grant_type = required_env("grant_type")
+    response_type = required_env("response_type")
+    state = required_env("state")
+
+    app_session = fyersModel.SessionModel(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        response_type=response_type,
+        state=state,
+        secret_key=secret_key,
+        grant_type=grant_type,
+    )
+
+    cached = read_tokens()
+    access_token = os.getenv("FYERS_ACCESS_TOKEN") or cached.get("access_token")
+    refresh_token = os.getenv("refresh_token") or cached.get("refresh_token")
+
+    if access_token:
+        if access_token_works(client_id, access_token):
+            print("Using cached access token.")
+        else:
+            access_token = None
+
+    if not access_token and refresh_token and os.getenv("pin"):
+        try:
+            refreshed = refresh_access_token(client_id, secret_key, refresh_token, required_env("pin"))
+            cached.update(refreshed)
+            write_tokens(cached)
+            access_token = refreshed["access_token"]
+            print("Access token refreshed successfully.")
+        except Exception as refresh_error:
+            print(f"Refresh unavailable; starting browser login: {refresh_error}")
+            access_token = None
+
+    if not access_token:
+        auth_code = os.getenv("auth_code") or browser_auth_code(
+            app_session.generate_authcode(), state
+        )
+        tokens = exchange_auth_code(app_session, auth_code)
+        cached.update(tokens)
+        write_tokens(cached)
+        access_token = tokens["access_token"]
+        print("Access and refresh tokens generated and cached successfully.")
+
+    fyers = build_client(client_id, access_token)
+    profile = fyers.get_profile()
+    if not response_is_ok(profile):
+        raise RuntimeError(f"Fyers profile check failed: {profile}")
+    print("Fyers authentication is ready.")
+    print(profile)
+    return fyers
+
+
+if __name__ == "__main__":
+    main()
