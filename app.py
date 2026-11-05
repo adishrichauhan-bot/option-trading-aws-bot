@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +130,7 @@ class FyersMarketData:
         symbols = ",".join(INDEXES[name]["symbol"] for name in names)
         quotes_response = self.client.quotes(data={"symbols": symbols})
         output: dict[str, Any] = {
-            "fetched_at": datetime.now(UTC).isoformat(),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
             "indices": {},
         }
         for name in names:
