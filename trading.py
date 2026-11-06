@@ -18,6 +18,8 @@ from typing import Any, Protocol
 
 from dotenv import load_dotenv
 
+from market_data_ws import FyersMarketDataSocket
+
 load_dotenv()
 
 UNDERLYINGS = {
@@ -259,19 +261,7 @@ def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
     )
 
 
-def quote_price(client: Any, symbol: str) -> float:
-    response = client.quotes(data={"symbols": symbol})
-    rows = response.get("d", [])
-    if not rows:
-        raise RuntimeError(f"No quote returned for {symbol}")
-    value = rows[0].get("v", rows[0])
-    price = value.get("lp") if isinstance(value, dict) else None
-    if price is None:
-        raise RuntimeError(f"Quote has no last price for {symbol}: {response}")
-    return float(price)
-
-
-def authenticated_client() -> Any:
+def authenticated_credentials() -> tuple[str, str]:
     # Keep Fyers imports out of parser-only usage.
     from auth import build_client, read_tokens
 
@@ -280,6 +270,13 @@ def authenticated_client() -> Any:
     access_token = os.getenv("FYERS_ACCESS_TOKEN") or tokens.get("access_token")
     if not client_id or not access_token:
         raise RuntimeError("Run auth.py first to create a usable cached access token")
+    return client_id, access_token
+
+
+def authenticated_client() -> Any:
+    from auth import build_client
+
+    client_id, access_token = authenticated_credentials()
     return build_client(client_id, access_token)
 
 
@@ -300,6 +297,7 @@ def main() -> None:
         print(json.dumps(asdict(trade_call)))
         return
 
+    client_id, access_token = authenticated_credentials()
     client = authenticated_client()
     symbol = resolve_option_symbol(client, trade_call)
     print(json.dumps({"signal": trade_call.__dict__, "symbol": symbol, "live": args.live}, default=str))
@@ -307,12 +305,16 @@ def main() -> None:
     trader = BreakoutTrader(
         trade_call, symbol, args.quantity, args.lot_size, FyersOrderExecutor(client, live=args.live)
     )
-    print("Waiting for a confirmed upward cross; no order is placed on the first price tick.")
+    stream = FyersMarketDataSocket(client_id, access_token)
+    stream.subscribe([symbol])
+    print("Waiting for WebSocket ticks and a confirmed upward cross; no order is placed on the first tick.")
     while not trader.closed:
-        price = quote_price(client, symbol)
+        message = stream.wait_for_update(symbol)
+        price = float(message["ltp"])
         print(f"{symbol} price={price}")
         trader.on_price(price)
-        time.sleep(args.interval)
+        if args.interval > 0:
+            time.sleep(args.interval)
 
 
 if __name__ == "__main__":

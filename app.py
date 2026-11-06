@@ -1,4 +1,4 @@
-"""Small HTTP API for Fyers index and ATM option market data."""
+"""Small API for Fyers index and ATM option market data."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+
+from market_data_ws import FyersMarketDataSocket
 
 
 load_dotenv()
@@ -125,30 +127,55 @@ class FyersMarketData:
         self.client = fyersModel.FyersModel(
             client_id=client_id, token=access_token, is_async=False, log_path=""
         )
+        self.stream = FyersMarketDataSocket(client_id, access_token)
 
     def fetch(self, names: list[str], strike_count: int) -> dict[str, Any]:
-        symbols = ",".join(INDEXES[name]["symbol"] for name in names)
-        quotes_response = self.client.quotes(data={"symbols": symbols})
         output: dict[str, Any] = {
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "indices": {},
         }
+        index_symbols = [INDEXES[name]["symbol"] for name in names]
+        option_chains: dict[str, tuple[dict[str, Any], float]] = {}
+        stream_symbols = set(index_symbols)
         for name in names:
             index = INDEXES[name]
-            quote = _quote(quotes_response, index["symbol"])
-            spot = _number(_value(quote, "lp", "ltp", "last_price"))
-            if spot is None:
-                raise ValueError(f"No last traded price returned for {index['symbol']}")
             chain_response = self.client.optionchain(
                 data={"symbol": index["symbol"], "strikecount": strike_count}
             )
+            index_stream_quote = self.stream.latest(index["symbol"])
+            spot = _number(_value(index_stream_quote or {}, "ltp", "lp", "last_price"))
+            if spot is None:
+                # The stream may not have delivered its first tick yet. Subscribe
+                # and wait for the first SymbolUpdate instead of polling quotes().
+                index_stream_quote = self.stream.wait_for(index["symbol"])
+                spot = _number(_value(index_stream_quote, "ltp", "lp", "last_price"))
+            if spot is None:
+                raise ValueError(f"No last traded price returned for {index['symbol']}")
+            atm = _atm_options(chain_response, spot)
+            option_symbols = [str(option["symbol"]) for option in atm.values() if option.get("symbol")]
+            stream_symbols.update(option_symbols)
+            option_chains[name] = (chain_response, spot)
+
+        self.stream.subscribe(stream_symbols)
+        for name in names:
+            index = INDEXES[name]
+            chain_response, spot = option_chains[name]
+            quote = self.stream.wait_for(index["symbol"])
+            atm_options = _atm_options(chain_response, spot)
+            for option_type, option in atm_options.items():
+                option_symbol = option.get("symbol")
+                if option_symbol:
+                    option_quote = self.stream.wait_for(str(option_symbol))
+                    option["ltp"] = _number(_value(option_quote, "ltp", "lp", "last_price"))
+                    option["bid"] = _number(_value(option_quote, "bid_price", "bid"))
+                    option["ask"] = _number(_value(option_quote, "ask_price", "ask"))
             output["indices"][name] = {
                 "name": index["name"],
                 "symbol": index["symbol"],
                 "spot": spot,
                 "change": _number(_value(quote, "ch", "change")),
                 "change_percent": _number(_value(quote, "chp", "change_percent")),
-                "atm_options": _atm_options(chain_response, spot),
+                "atm_options": atm_options,
             }
         return output
 
