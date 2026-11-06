@@ -7,6 +7,7 @@ signal, option symbol, quantity, and order responses in a non-production setup.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import math
 import os
@@ -287,6 +288,94 @@ def _option_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _option_type(row: dict[str, Any]) -> str:
+    return str(
+        row.get("option_type", row.get("optionType", row.get("optType", "")))
+    ).upper()
+
+
+def _strike(row: dict[str, Any]) -> float | None:
+    value = row.get("strike_price", row.get("strikePrice", row.get("strike")))
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _master_code(exchange: str) -> str:
+    return {"NSE": "NSE_FO", "BSE": "BSE_FO", "MCX": "MCX_COM"}.get(
+        exchange, "NSE_FO"
+    )
+
+
+def _load_symbol_master(exchange: str) -> dict[str, Any]:
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError("Install dependencies with: pip install -r requirements.txt") from exc
+
+    master = _master_code(exchange)
+    cache_dir = Path(os.path.expanduser("~/.fyers/sym_master"))
+    cache_path = cache_dir / f"{master}.json"
+    today = dt.date.today().isoformat()
+    if cache_path.exists() and dt.datetime.fromtimestamp(
+        cache_path.stat().st_mtime, tz=dt.timezone.utc
+    ).date().isoformat() == today:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+
+    try:
+        response = requests.get(
+            f"https://public.fyers.in/sym_details/{master}_sym_master.json",
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Could not download the Fyers symbol master: {exc}") from exc
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError(f"Unexpected {master} symbol-master response")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(data), encoding="utf-8")
+    return data
+
+
+def _resolve_from_symbol_master(trade_call: TradeCall) -> str | None:
+    exchange = trade_call.underlying.split(":", 1)[0] if ":" in trade_call.underlying else "NSE"
+    underlying = trade_call.underlying.split(":", 1)[-1].upper()
+    master = _load_symbol_master(exchange)
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    matches: list[tuple[float, str]] = []
+    for key, raw_record in master.items():
+        if not isinstance(raw_record, dict):
+            continue
+        symbol = str(raw_record.get("symTicker", key))
+        if not symbol.upper().startswith(f"{exchange}:"):
+            continue
+        if _option_type(raw_record) != trade_call.option_type:
+            continue
+        if _strike(raw_record) != trade_call.strike:
+            continue
+        searchable = " ".join(
+            [symbol]
+            + [
+                str(raw_record.get(field, ""))
+            for field in ("underlyingSymbol", "underlying_symbol", "exSymName", "symDetails", "symbol")
+            ]
+        ).upper()
+        if underlying not in searchable:
+            continue
+        try:
+            expiry = float(raw_record.get("expiryDate", raw_record.get("expiry_date", 0)) or 0)
+        except (TypeError, ValueError):
+            expiry = 0
+        if expiry and expiry < now:
+            continue
+        matches.append((expiry or float("inf"), symbol))
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item[0])[1]
+
+
 def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
     if trade_call.fyers_symbol:
         return trade_call.fyers_symbol
@@ -295,12 +384,16 @@ def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
     )
     for row in _option_rows(response):
         if (
-            row.get("option_type") == trade_call.option_type
-            and float(row.get("strike_price", -1)) == trade_call.strike
+            _option_type(row) == trade_call.option_type
+            and _strike(row) == trade_call.strike
         ):
             return str(row["symbol"])
+    symbol = _resolve_from_symbol_master(trade_call)
+    if symbol:
+        return symbol
     raise ValueError(
-        f"Could not resolve {trade_call.instrument_name} in the nearest Fyers option chain"
+        f"Could not resolve {trade_call.instrument_name}. Check the exchange, expiry, "
+        "strike, and option type against the current Fyers symbol master."
     )
 
 
