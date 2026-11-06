@@ -149,6 +149,13 @@ The active stop-loss also advances during the trade: it starts at the original
 after target 2 is crossed. A fall below the current active stop-loss exits the
 remaining quantity.
 
+Instrument parsing accepts generic names such as `BANKNIFTY 55000 CE`,
+`FINNIFTY 24000 PE`, and `MCX:CRUDEOIL 7000 CE`. For an equity option or an
+exact contract, use the exchange-qualified Fyers underlying or full symbol,
+for example `NSE:RELIANCE-EQ 1400 CE` or `NSE:NIFTY2632423050CE`. Full Fyers
+symbols are passed through directly; validate them against the daily symbol
+master before live order placement.
+
 Create a signal file:
 
 ```bash

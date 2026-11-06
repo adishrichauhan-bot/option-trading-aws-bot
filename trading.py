@@ -22,9 +22,14 @@ from market_data_ws import FyersMarketDataSocket
 
 load_dotenv()
 
-UNDERLYINGS = {
+UNDERLYING_SYMBOLS = {
     "NIFTY": "NSE:NIFTY50-INDEX",
+    "NIFTY50": "NSE:NIFTY50-INDEX",
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "SENSEX": "BSE:SENSEX-INDEX",
+    "BANKEX": "BSE:BANKEX-INDEX",
 }
 NUMBER = r"\d+(?:\.\d+)?"
 DASH = r"[-–—]"
@@ -34,16 +39,22 @@ DASH = r"[-–—]"
 class TradeCall:
     instrument_name: str
     underlying: str
-    strike: float
+    strike: float | None
     option_type: str
     buy_above: float
     targets: tuple[float, float, float]
     stoploss: float
     buying_range: tuple[float, float] | None = None
+    fyers_symbol: str | None = None
 
     @property
     def underlying_symbol(self) -> str:
-        return UNDERLYINGS[self.underlying]
+        if ":" in self.underlying:
+            return self.underlying
+        return UNDERLYING_SYMBOLS.get(
+            self.underlying,
+            f"{os.getenv('FYERS_DEFAULT_EXCHANGE', 'NSE')}:{self.underlying}-INDEX",
+        )
 
 
 def _match(text: str, pattern: str, label: str) -> re.Match[str]:
@@ -55,15 +66,37 @@ def _match(text: str, pattern: str, label: str) -> re.Match[str]:
 
 def parse_trade_call(text: str) -> TradeCall:
     """Parse BUY ABOVE or BUYING RANGE trade-call formats."""
-    instrument = _match(
+    full_symbol_match = re.search(
+        r"^\s*(?P<symbol>(?P<exchange>NSE|BSE|MCX):(?P<body>[A-Z0-9&._-]+(?:CE|PE)))\s*$",
         text,
-        rf"^\s*(?P<underlying>NIFTY|SENSEX)\s+(?P<strike>{NUMBER})\s+(?P<option_type>CE|PE)\s*$",
-        "instrument name",
+        flags=re.IGNORECASE | re.MULTILINE,
     )
-    underlying = instrument.group("underlying").upper()
-    strike = float(instrument.group("strike"))
-    option_type = instrument.group("option_type").upper()
-    instrument_name = f"{underlying} {strike:g} {option_type}"
+    shorthand_match = re.search(
+        rf"^\s*(?P<underlying>(?:(?:NSE|BSE|MCX):)?[A-Z0-9][A-Z0-9&._-]*)\s+"
+        rf"(?P<strike>{NUMBER})\s+(?P<option_type>CE|PE)\s*$",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    fyers_symbol: str | None = None
+    if full_symbol_match:
+        fyers_symbol = full_symbol_match.group("symbol").upper()
+        body = full_symbol_match.group("body").upper()
+        option_type = body[-2:]
+        # The exact Fyers symbol is retained and resolved directly. Its expiry
+        # encoding makes strike extraction ambiguous without the symbol master.
+        strike = None
+        underlying = body[:-2]
+        instrument_name = fyers_symbol
+    elif shorthand_match:
+        raw_underlying = shorthand_match.group("underlying").upper()
+        underlying = raw_underlying
+        strike = float(shorthand_match.group("strike"))
+        option_type = shorthand_match.group("option_type").upper()
+        instrument_name = f"{underlying} {strike:g} {option_type}"
+    else:
+        raise ValueError(
+            "Instrument must be '<UNDERLYING> <STRIKE> CE/PE' or a full Fyers symbol"
+        )
 
     buy_above_match = re.search(
         rf"BUY\s+ABOVE\s*{DASH}\s*(?P<price>{NUMBER})", text, flags=re.IGNORECASE
@@ -114,6 +147,7 @@ def parse_trade_call(text: str) -> TradeCall:
         targets=targets,
         stoploss=stoploss,
         buying_range=buying_range,
+        fyers_symbol=fyers_symbol,
     )
 
 
@@ -254,6 +288,8 @@ def _option_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
+    if trade_call.fyers_symbol:
+        return trade_call.fyers_symbol
     response = client.optionchain(
         data={"symbol": trade_call.underlying_symbol, "strikecount": 50}
     )
