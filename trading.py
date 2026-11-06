@@ -177,7 +177,8 @@ class FyersOrderExecutor:
             "offlineOrder": False,
             "stopLoss": 0,
             "takeProfit": 0,
-            "orderTag": "mvp-trader",
+            # Fyers orderTag accepts alphanumeric characters only.
+            "orderTag": "mvpTrader",
             "isSliceOrder": False,
         }
         if not self.live:
