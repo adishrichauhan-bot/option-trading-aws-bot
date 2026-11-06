@@ -149,7 +149,10 @@ class FyersOrderExecutor:
             print(json.dumps({"dry_run": True, "reason": reason, "order": order}))
             return {"s": "dry_run", "order": order}
         print(f"LIVE ORDER: {reason}: {side=} {quantity=} {symbol=}")
-        return self.client.place_order(order)
+        response = self.client.place_order(order)
+        if isinstance(response, dict) and response.get("s") == "error":
+            raise RuntimeError(f"Fyers rejected order: {response}")
+        return response
 
 
 @dataclass(frozen=True)
@@ -161,7 +164,7 @@ class OrderAction:
 
 
 class BreakoutTrader:
-    """State machine that reacts only to observed price crossings."""
+    """State machine for entry, staged exits, and a trailing stop by target."""
 
     def __init__(
         self,
@@ -182,6 +185,7 @@ class BreakoutTrader:
         self.entered = False
         self.closed = False
         self.remaining_quantity = 0
+        self.active_stoploss = trade_call.stoploss
         self.targets_hit: set[int] = set()
         self.target_quantities = self._allocate_targets()
 
@@ -209,11 +213,12 @@ class BreakoutTrader:
             self.previous_price = price
             return actions
 
-        if previous >= self.trade_call.stoploss > price:
+        if previous >= self.active_stoploss > price:
             quantity = self.remaining_quantity
             if quantity:
-                self.executor.market_order(self.symbol, quantity, -1, "stoploss crossed")
-                actions.append(OrderAction("stoploss crossed", quantity, -1, price))
+                reason = f"stoploss_{self.active_stoploss:g} crossed"
+                self.executor.market_order(self.symbol, quantity, -1, reason)
+                actions.append(OrderAction(reason, quantity, -1, price))
             self.remaining_quantity = 0
             self.closed = True
             self.previous_price = price
@@ -224,6 +229,8 @@ class BreakoutTrader:
                 continue
             quantity = min(self.target_quantities[index], self.remaining_quantity)
             self.targets_hit.add(index)
+            if index in {0, 1}:
+                self.active_stoploss = target
             if quantity:
                 self.executor.market_order(
                     self.symbol, quantity, -1, f"target_{index + 1} crossed"
@@ -263,7 +270,7 @@ def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
 
 def authenticated_credentials() -> tuple[str, str]:
     # Keep Fyers imports out of parser-only usage.
-    from auth import build_client, read_tokens
+    from auth import read_tokens
 
     client_id = os.getenv("FYERS_CLIENT_ID") or os.getenv("client_id")
     tokens = read_tokens()

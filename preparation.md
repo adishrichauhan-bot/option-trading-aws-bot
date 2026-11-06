@@ -144,6 +144,11 @@ Supported format: `NIFTY 23450 CE`, `BUY ABOVE - 140`, `TARGET - 150, 163, 180`,
 
 Buying ranges are supported; the upper range value is the breakout trigger. The strategy buys after an observed upward cross, exits approximately 50%, 30%, and the remaining quantity at the targets, and exits the full remaining quantity when price crosses below stop-loss. Whole-lot rules may prevent exact percentages.
 
+The active stop-loss also advances during the trade: it starts at the original
+`SL`, changes to `target_1` after target 1 is crossed, and changes to `target_2`
+after target 2 is crossed. A fall below the current active stop-loss exits the
+remaining quantity.
+
 Create a signal file:
 
 ```bash
@@ -207,6 +212,39 @@ On EC2 run, in order: `cd ~/option-trading-aws-bot`; `git pull origin main`; `so
 From a second EC2 terminal run: `curl -i http://127.0.0.1:8000/health` and `curl -i http://127.0.0.1:8000/market-data`.
 
 To commit these notes run: `git status`; `git add preparation.md`; `git diff --cached --stat`; `git commit -m "Expand preparation command reference"`; and `git push origin main`.
+
+## Simple live-trader entry point
+
+Use [`live_trader.py`](./live_trader.py) as the single interactive entry
+point. It prompts for the trade call, quantity, and lot size, resolves the
+exact Fyers option symbol, prints a preflight summary, and starts the existing
+WebSocket strategy.
+
+Start in dry-run mode:
+
+```bash
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+python live_trader.py
+```
+
+Alternatively, provide a signal file and values directly:
+
+```bash
+python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75
+```
+
+Real order placement requires both the `--live` flag and typing `LIVE` at the
+confirmation prompt:
+
+```bash
+python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75 --live
+```
+
+Optional environment defaults are `FYERS_QUANTITY`, `FYERS_LOT_SIZE`,
+`FYERS_PRODUCT_TYPE`, and `FYERS_MAX_QUANTITY`. The default maximum quantity
+is 10,000. Pressing `Ctrl+C` stops monitoring; it does not silently close a
+broker position, so verify any open position in Fyers.
 
 ## Fyers WebSocket market data
 
