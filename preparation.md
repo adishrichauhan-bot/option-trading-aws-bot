@@ -183,10 +183,10 @@ Run dry-run trading:
 python trading.py trade_call.txt --quantity 750 --lot-size 75 --interval 2
 ```
 
-Real orders require explicit `--live` after validating the symbol, lot size, quantity, product type, and dry-run output:
+The direct strategy command asks whether this is a live trading session:
 
 ```bash
-python trading.py trade_call.txt --quantity 750 --lot-size 75 --interval 2 --live
+python trading.py trade_call.txt --quantity 750 --lot-size 75 --interval 2
 ```
 
 ## End-of-day shutdown
@@ -249,11 +249,10 @@ Alternatively, provide a signal file and values directly:
 python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75
 ```
 
-Real order placement requires both the `--live` flag and typing `LIVE` at the
-confirmation prompt:
+The interactive entry point asks `Is this a live trading session? (y/n):`:
 
 ```bash
-python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75 --live
+python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75
 ```
 
 Optional environment defaults are `FYERS_QUANTITY`, `FYERS_LOT_SIZE`,

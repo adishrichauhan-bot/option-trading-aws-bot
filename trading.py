@@ -1,7 +1,7 @@
 """Parse trade calls and execute a cross/target/stop-loss strategy.
 
-This module is dry-run by default. Pass ``--live`` only after validating the
-signal, option symbol, quantity, and order responses in a non-production setup.
+This module is dry-run by default. Live mode is selected interactively after
+the user answers the live-session prompt.
 """
 
 from __future__ import annotations
@@ -201,6 +201,17 @@ class FyersOrderExecutor:
             "isSliceOrder": False,
         }
         return self._place_order(order, reason)
+
+
+def ask_live_session() -> bool:
+    """Ask whether this run may place real orders."""
+    while True:
+        answer = input("Is this a live trading session? (y/n): ").strip().lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer y or n.")
 
     def limit_order(
         self, symbol: str, quantity: int, side: int, limit_price: float, reason: str
@@ -473,7 +484,6 @@ def main() -> None:
     parser.add_argument(
         "--parse-only", action="store_true", help="Parse and print the signal without API access"
     )
-    parser.add_argument("--live", action="store_true", help="Enable real order placement")
     args = parser.parse_args()
 
     trade_call = parse_trade_call(args.signal_file.read_text(encoding="utf-8"))
@@ -481,13 +491,14 @@ def main() -> None:
         print(json.dumps(asdict(trade_call)))
         return
 
+    live = ask_live_session()
     client_id, access_token = authenticated_credentials()
     client = authenticated_client()
     symbol = resolve_option_symbol(client, trade_call)
-    print(json.dumps({"signal": trade_call.__dict__, "symbol": symbol, "live": args.live}, default=str))
+    print(json.dumps({"signal": trade_call.__dict__, "symbol": symbol, "live": live}, default=str))
 
     trader = BreakoutTrader(
-        trade_call, symbol, args.quantity, args.lot_size, FyersOrderExecutor(client, live=args.live)
+        trade_call, symbol, args.quantity, args.lot_size, FyersOrderExecutor(client, live=live)
     )
     stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])

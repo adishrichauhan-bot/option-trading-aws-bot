@@ -1,7 +1,7 @@
 """Simple interactive entry point for the Fyers breakout strategy.
 
-Dry-run is the default. Real orders require both ``--live`` and typing LIVE
-at the confirmation prompt.
+Dry-run is the default. The program asks whether this is a live trading
+session before connecting to the order path.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from market_data_ws import FyersMarketDataSocket
 from trading import (
     BreakoutTrader,
     FyersOrderExecutor,
+    ask_live_session,
     authenticated_client,
     authenticated_credentials,
     parse_trade_call,
@@ -79,7 +80,6 @@ def main() -> None:
     parser.add_argument("--quantity", type=int, help="Total quantity; otherwise prompt or read FYERS_QUANTITY")
     parser.add_argument("--lot-size", type=int, help="Lot size; otherwise prompt or read FYERS_LOT_SIZE")
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
-    parser.add_argument("--live", action="store_true", help="Enable real order placement after confirmation")
     args = parser.parse_args()
 
     signal = parse_trade_call(read_signal(args.signal_file))
@@ -91,7 +91,8 @@ def main() -> None:
     if quantity % lot_size:
         raise ValueError(f"Quantity must be a multiple of the lot size ({lot_size})")
 
-    mode = "LIVE" if args.live else "DRY RUN"
+    live = ask_live_session()
+    mode = "LIVE" if live else "DRY RUN"
     print("\nTrade preflight")
     print(json.dumps({
         "instrument": signal.instrument_name,
@@ -103,11 +104,6 @@ def main() -> None:
         "lot_size": lot_size,
         "mode": mode,
     }, indent=2, default=str))
-
-    if args.live:
-        confirmation = input("Type LIVE to place real orders: ").strip()
-        if confirmation != "LIVE":
-            raise SystemExit("Live confirmation was not provided; no order was placed.")
 
     client_id, access_token = authenticated_credentials()
     client = authenticated_client()
@@ -121,7 +117,7 @@ def main() -> None:
         symbol,
         quantity,
         lot_size,
-        FyersOrderExecutor(client, live=args.live),
+        FyersOrderExecutor(client, live=live),
     )
     print("Waiting for a WebSocket breakout tick. Press Ctrl+C to stop monitoring.")
 
