@@ -40,7 +40,7 @@ def read_signal(signal_file: Path | None) -> str:
 
     print("Enter the trade call. Press Enter after each line.")
     instrument = input("Instrument (example: NIFTY 23450 CE): ")
-    buy_line = input("Buy line (BUY ABOVE or BUYING RANGE): ").strip()
+    buy_line = input("Buy line (BUY ABOVE or TRIGGER RANGE): ").strip()
     target_line = input("Targets (example: TARGET - 150, 163, 180): ").strip()
     stoploss_line = input("Stop-loss (example: SL - 127): ").strip()
 
@@ -54,7 +54,7 @@ def normalize_interactive_signal(lines: list[str]) -> str:
     # File-based signals remain explicit and are parsed unchanged.
     if re.fullmatch(r"\s*\d+(?:\.\d+)?\s*[,/]\s*\d+(?:\.\d+)?\s*", buy_line):
         low, high = re.split(r"\s*[,/]\s*", buy_line)
-        buy_line = f"BUYING RANGE - {low} - {high}"
+        buy_line = f"TRIGGER RANGE - {low} - {high}"
     if re.fullmatch(
         r"\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*",
         target_line,
@@ -95,6 +95,7 @@ def main() -> None:
     print("\nTrade preflight")
     print(json.dumps({
         "instrument": signal.instrument_name,
+        "trigger_range": signal.trigger_range,
         "buy_above": signal.buy_above,
         "targets": signal.targets,
         "stoploss": signal.stoploss,

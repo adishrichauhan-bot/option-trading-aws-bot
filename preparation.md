@@ -142,10 +142,12 @@ The API binds to localhost and is not directly exposed publicly. If Uvicorn was 
 
 Supported format: `NIFTY 23450 CE`, `BUY ABOVE - 140`, `TARGET - 150, 163, 180`, `SL - 127`.
 
-Buying ranges are supported as bounded entry-price bands. For example,
-`385,386` means the strategy may buy only while the option price is between
-385 and 386; it will not buy at 425.70 after the price has jumped beyond the
-range. A `BUY ABOVE` value remains a breakout trigger. The strategy exits
+Trigger ranges are supported as bounded trigger bands. For example,
+`TRIGGER RANGE - 377 - 380` means that when price crosses above 380, the
+strategy submits a limit order with `limitPrice=380`; it will never use the
+current LTP such as 416 as the limit price. The old `BUYING RANGE` label is
+still accepted as an input alias. A `BUY ABOVE` value remains a market-order
+breakout trigger. The strategy exits
 approximately 50%, 30%, and the remaining quantity at the targets, and exits
 the full remaining quantity when price crosses below stop-loss. Whole-lot
 rules may prevent exact percentages.

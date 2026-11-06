@@ -45,7 +45,7 @@ class TradeCall:
     buy_above: float
     targets: tuple[float, float, float]
     stoploss: float
-    buying_range: tuple[float, float] | None = None
+    trigger_range: tuple[float, float] | None = None
     fyers_symbol: str | None = None
 
     @property
@@ -66,7 +66,7 @@ def _match(text: str, pattern: str, label: str) -> re.Match[str]:
 
 
 def parse_trade_call(text: str) -> TradeCall:
-    """Parse BUY ABOVE or BUYING RANGE trade-call formats."""
+    """Parse BUY ABOVE or TRIGGER RANGE trade-call formats."""
     full_symbol_match = re.search(
         r"^\s*(?P<symbol>(?P<exchange>NSE|BSE|MCX):(?P<body>[A-Z0-9&._-]+(?:CE|PE)))\s*$",
         text,
@@ -103,24 +103,23 @@ def parse_trade_call(text: str) -> TradeCall:
         rf"BUY\s+ABOVE\s*{DASH}\s*(?P<price>{NUMBER})", text, flags=re.IGNORECASE
     )
     range_match = re.search(
-        rf"BUYING\s+RANGE\s*{DASH}\s*(?P<low>{NUMBER})\s*{DASH}\s*(?P<high>{NUMBER})",
+        rf"(?:TRIGGER|BUYING)\s+RANGE\s*{DASH}\s*(?P<low>{NUMBER})\s*{DASH}\s*(?P<high>{NUMBER})",
         text,
         flags=re.IGNORECASE,
     )
     if buy_above_match:
         buy_above = float(buy_above_match.group("price"))
-        buying_range = None
+        trigger_range = None
     elif range_match:
         low = float(range_match.group("low"))
         high = float(range_match.group("high"))
         if low >= high:
-            raise ValueError("Buying-range low must be less than high")
-        # A buying range is an allowed entry-price band, not a breakout above
-        # the upper boundary. The upper value remains buy_above for validation.
+            raise ValueError("Trigger-range low must be less than high")
+        # The range is crossed when price moves above its upper boundary.
         buy_above = high
-        buying_range = (low, high)
+        trigger_range = (low, high)
     else:
-        raise ValueError("Trade call must contain BUY ABOVE or BUYING RANGE")
+        raise ValueError("Trade call must contain BUY ABOVE or TRIGGER RANGE")
 
     target_match = _match(
         text,
@@ -148,7 +147,7 @@ def parse_trade_call(text: str) -> TradeCall:
         buy_above=buy_above,
         targets=targets,
         stoploss=stoploss,
-        buying_range=buying_range,
+        trigger_range=trigger_range,
         fyers_symbol=fyers_symbol,
     )
 
@@ -157,12 +156,31 @@ class OrderExecutor(Protocol):
     def market_order(self, symbol: str, quantity: int, side: int, reason: str) -> Any:
         ...
 
+    def limit_order(
+        self, symbol: str, quantity: int, side: int, limit_price: float, reason: str
+    ) -> Any:
+        ...
+
 
 class FyersOrderExecutor:
     def __init__(self, client: Any, *, live: bool = False) -> None:
         self.client = client
         self.live = live
         self.product_type = os.getenv("FYERS_PRODUCT_TYPE", "INTRADAY")
+
+    def _place_order(self, order: dict[str, Any], reason: str) -> Any:
+        if not self.live:
+            print(json.dumps({"dry_run": True, "reason": reason, "order": order}))
+            return {"s": "dry_run", "order": order}
+        print(
+            f"LIVE ORDER: {reason}: side={order['side']} "
+            f"quantity={order['qty']} symbol={order['symbol']}"
+        )
+        print(f"LIVE ORDER PAYLOAD: {json.dumps(order, sort_keys=True)}")
+        response = self.client.place_order(order)
+        if isinstance(response, dict) and response.get("s") == "error":
+            raise RuntimeError(f"Fyers rejected order: {response}")
+        return response
 
     def market_order(self, symbol: str, quantity: int, side: int, reason: str) -> Any:
         order = {
@@ -182,15 +200,28 @@ class FyersOrderExecutor:
             "orderTag": "mvpTrader",
             "isSliceOrder": False,
         }
-        if not self.live:
-            print(json.dumps({"dry_run": True, "reason": reason, "order": order}))
-            return {"s": "dry_run", "order": order}
-        print(f"LIVE ORDER: {reason}: {side=} {quantity=} {symbol=}")
-        print(f"LIVE ORDER PAYLOAD: {json.dumps(order, sort_keys=True)}")
-        response = self.client.place_order(order)
-        if isinstance(response, dict) and response.get("s") == "error":
-            raise RuntimeError(f"Fyers rejected order: {response}")
-        return response
+        return self._place_order(order, reason)
+
+    def limit_order(
+        self, symbol: str, quantity: int, side: int, limit_price: float, reason: str
+    ) -> Any:
+        order = {
+            "symbol": symbol,
+            "qty": quantity,
+            "type": 1,
+            "side": side,
+            "productType": self.product_type,
+            "limitPrice": limit_price,
+            "stopPrice": 0,
+            "validity": "DAY",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+            "stopLoss": 0,
+            "takeProfit": 0,
+            "orderTag": "mvpTrader",
+            "isSliceOrder": False,
+        }
+        return self._place_order(order, reason)
 
 
 @dataclass(frozen=True)
@@ -238,25 +269,26 @@ class BreakoutTrader:
             raise ValueError("Price must be positive")
         if self.previous_price is None:
             self.previous_price = price
-            actions: list[OrderAction] = []
-            buying_range = self.trade_call.buying_range
-            if buying_range and buying_range[0] <= price <= buying_range[1]:
-                self.executor.market_order(self.symbol, self.quantity, 1, "buying range entered")
-                self.entered = True
-                self.remaining_quantity = self.quantity
-                actions.append(OrderAction("buying range entered", self.quantity, 1, price))
-            return actions
+            return []
 
         previous = self.previous_price
         actions: list[OrderAction] = []
         if not self.entered:
-            buying_range = self.trade_call.buying_range
-            in_buying_range = bool(
-                buying_range and buying_range[0] <= price <= buying_range[1]
+            trigger_range = self.trade_call.trigger_range
+            crossed_trigger_range = bool(
+                trigger_range and previous <= trigger_range[1] < price
             )
             crossed_buy_above = previous <= self.trade_call.buy_above < price
-            if in_buying_range or crossed_buy_above:
-                reason = "buying range entered" if in_buying_range else "buy-above crossed"
+            if crossed_trigger_range:
+                reason = "trigger range crossed"
+                self.executor.limit_order(
+                    self.symbol, self.quantity, 1, trigger_range[1], reason
+                )
+                self.entered = True
+                self.remaining_quantity = self.quantity
+                actions.append(OrderAction(reason, self.quantity, 1, trigger_range[1]))
+            elif crossed_buy_above:
+                reason = "buy-above crossed"
                 self.executor.market_order(self.symbol, self.quantity, 1, reason)
                 self.entered = True
                 self.remaining_quantity = self.quantity
