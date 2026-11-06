@@ -115,7 +115,8 @@ def parse_trade_call(text: str) -> TradeCall:
         high = float(range_match.group("high"))
         if low >= high:
             raise ValueError("Buying-range low must be less than high")
-        # A range becomes a breakout trigger at its upper boundary.
+        # A buying range is an allowed entry-price band, not a breakout above
+        # the upper boundary. The upper value remains buy_above for validation.
         buy_above = high
         buying_range = (low, high)
     else:
@@ -185,6 +186,7 @@ class FyersOrderExecutor:
             print(json.dumps({"dry_run": True, "reason": reason, "order": order}))
             return {"s": "dry_run", "order": order}
         print(f"LIVE ORDER: {reason}: {side=} {quantity=} {symbol=}")
+        print(f"LIVE ORDER PAYLOAD: {json.dumps(order, sort_keys=True)}")
         response = self.client.place_order(order)
         if isinstance(response, dict) and response.get("s") == "error":
             raise RuntimeError(f"Fyers rejected order: {response}")
@@ -236,16 +238,29 @@ class BreakoutTrader:
             raise ValueError("Price must be positive")
         if self.previous_price is None:
             self.previous_price = price
-            return []
+            actions: list[OrderAction] = []
+            buying_range = self.trade_call.buying_range
+            if buying_range and buying_range[0] <= price <= buying_range[1]:
+                self.executor.market_order(self.symbol, self.quantity, 1, "buying range entered")
+                self.entered = True
+                self.remaining_quantity = self.quantity
+                actions.append(OrderAction("buying range entered", self.quantity, 1, price))
+            return actions
 
         previous = self.previous_price
         actions: list[OrderAction] = []
         if not self.entered:
-            if previous <= self.trade_call.buy_above < price:
-                self.executor.market_order(self.symbol, self.quantity, 1, "buy-above crossed")
+            buying_range = self.trade_call.buying_range
+            in_buying_range = bool(
+                buying_range and buying_range[0] <= price <= buying_range[1]
+            )
+            crossed_buy_above = previous <= self.trade_call.buy_above < price
+            if in_buying_range or crossed_buy_above:
+                reason = "buying range entered" if in_buying_range else "buy-above crossed"
+                self.executor.market_order(self.symbol, self.quantity, 1, reason)
                 self.entered = True
                 self.remaining_quantity = self.quantity
-                actions.append(OrderAction("buy-above crossed", self.quantity, 1, price))
+                actions.append(OrderAction(reason, self.quantity, 1, price))
             self.previous_price = price
             return actions
 
