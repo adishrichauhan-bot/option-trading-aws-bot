@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -38,13 +39,31 @@ def read_signal(signal_file: Path | None) -> str:
         return signal_file.read_text(encoding="utf-8")
 
     print("Enter the trade call. Press Enter after each line.")
-    lines = [
-        input("Instrument (example: NIFTY 23450 CE): "),
-        input("Buy line (BUY ABOVE or BUYING RANGE): "),
-        input("Targets (example: TARGET - 150, 163, 180): "),
-        input("Stop-loss (example: SL - 127): "),
-    ]
-    return "\n".join(lines)
+    instrument = input("Instrument (example: NIFTY 23450 CE): ")
+    buy_line = input("Buy line (BUY ABOVE or BUYING RANGE): ").strip()
+    target_line = input("Targets (example: TARGET - 150, 163, 180): ").strip()
+    stoploss_line = input("Stop-loss (example: SL - 127): ").strip()
+
+    return normalize_interactive_signal([instrument, buy_line, target_line, stoploss_line])
+
+
+def normalize_interactive_signal(lines: list[str]) -> str:
+    """Convert shorthand prompt values into the parser's explicit format."""
+    instrument, buy_line, target_line, stoploss_line = lines
+    # Accept the short values users naturally type at the interactive prompts.
+    # File-based signals remain explicit and are parsed unchanged.
+    if re.fullmatch(r"\s*\d+(?:\.\d+)?\s*[,/]\s*\d+(?:\.\d+)?\s*", buy_line):
+        low, high = re.split(r"\s*[,/]\s*", buy_line)
+        buy_line = f"BUYING RANGE - {low} - {high}"
+    if re.fullmatch(
+        r"\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*",
+        target_line,
+    ):
+        target_line = f"TARGET - {target_line}"
+    if re.fullmatch(r"\s*\d+(?:\.\d+)?\s*", stoploss_line):
+        stoploss_line = f"SL - {stoploss_line}"
+
+    return "\n".join([instrument, buy_line, target_line, stoploss_line])
 
 
 def read_quantity(value: int | None, label: str, env_name: str) -> int:
