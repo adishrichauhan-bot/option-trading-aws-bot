@@ -511,3 +511,51 @@ ENTRY PRICING: LTP=168 ATR_1m=... buffer=... limit=...
 
 The ATR period can be configured with `FYERS_ATR_PERIOD`; the default is 14
 completed one-minute bars.
+
+## Display recent Telegram messages
+
+To display all of the latest 100 messages from the default chat configured in
+`TELEGRAM_CHAT`:
+
+```bash
+python telegram_trade_listener.py --once --limit 100 --show-all
+```
+
+To display the latest 100 messages from a particular chat:
+
+```bash
+python telegram_trade_listener.py \
+  --chat "ACTUAL_CHAT_ID" \
+  --once \
+  --limit 100 \
+  --show-all
+```
+
+Replace `ACTUAL_CHAT_ID` with the numeric ID from
+`python telegram_trade_listener.py --list-dialogs`. Messages are printed in
+chronological order as JSON lines containing `message_id`, `chat_id`,
+`message_date`, and `raw_text`. Without `--show-all`, `--once` prints only
+recognized completed trade calls.
+
+To display an inclusive message-ID range from the default `TELEGRAM_CHAT`:
+
+```bash
+python telegram_trade_listener.py \
+  --once \
+  --message-id-range 100-150 \
+  --show-all
+```
+
+To display an inclusive message-ID range from a particular chat:
+
+```bash
+python telegram_trade_listener.py \
+  --chat "ACTUAL_CHAT_ID" \
+  --once \
+  --message-id-range 100-150 \
+  --show-all
+```
+
+`--message-id-range` accepts `START-END` (or `START:END`) and requires
+`--once`. The endpoints are included. Omit `--show-all` if only completed
+trade calls should be printed.

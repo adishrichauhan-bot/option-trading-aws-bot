@@ -304,10 +304,39 @@ async def _read_recent(
     entity: Any,
     limit: int,
     on_trade_call: Callable[[TradeCallMessage], None] | None = None,
+    show_all: bool = False,
+    message_id_range: tuple[int, int] | None = None,
 ) -> None:
-    messages = [message async for message in client.iter_messages(entity, limit=limit)]
+    if message_id_range is None:
+        messages = [message async for message in client.iter_messages(entity, limit=limit)]
+    else:
+        first_id, last_id = message_id_range
+        messages = [
+            message
+            async for message in client.iter_messages(
+                entity,
+                min_id=first_id - 1,
+                max_id=last_id + 1,
+                reverse=True,
+            )
+            if first_id <= message.id <= last_id
+        ]
     assembler = TradeCallAssembler()
     for message in reversed(messages):
+        if show_all:
+            print(
+                json.dumps(
+                    {
+                        "message_id": message.id,
+                        "chat_id": getattr(message, "chat_id", None),
+                        "message_date": message.date.isoformat() if message.date else None,
+                        "raw_text": message.raw_text or "",
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
         await _process_message(message, assembler, set(), on_trade_call)
 
 
@@ -352,6 +381,8 @@ async def _listen(
     limit: int,
     on_trade_call: Callable[[TradeCallMessage], None] | None = None,
     stop_event: Any | None = None,
+    show_all: bool = False,
+    message_id_range: tuple[int, int] | None = None,
 ) -> None:
     from telethon import events
     from telethon.utils import get_peer_id
@@ -378,7 +409,14 @@ async def _listen(
             )
         entity = await _resolve_chat(client, chat_ref)
         if once:
-            await _read_recent(client, entity, limit, on_trade_call)
+            await _read_recent(
+                client,
+                entity,
+                limit,
+                on_trade_call,
+                show_all,
+                message_id_range,
+            )
             return
 
         seen_ids: set[int] = set()
@@ -465,6 +503,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--once", action="store_true", help="Parse recent messages and exit")
     parser.add_argument("--limit", type=int, default=50, help="Number of recent messages for --once")
+    parser.add_argument(
+        "--show-all",
+        action="store_true",
+        help="Print every message when used with --once, including unrelated messages",
+    )
+    parser.add_argument(
+        "--message-id-range",
+        metavar="START-END",
+        help="Read an inclusive message-ID range, for example 100-150",
+    )
     parser.add_argument("--list-dialogs", action="store_true", help="List available chats and exit")
     parser.add_argument("--parse-file", type=Path, help="Parse a local message file without Telegram")
     return parser.parse_args()
@@ -495,9 +543,30 @@ def main() -> None:
     if args.limit < 1:
         raise SystemExit("--limit must be at least 1")
 
+    message_id_range = None
+    if args.message_id_range:
+        match = re.fullmatch(r"\s*(\d+)\s*[-:]\s*(\d+)\s*", args.message_id_range)
+        if not match:
+            raise SystemExit("--message-id-range must use START-END, for example 100-150")
+        first_id, last_id = (int(value) for value in match.groups())
+        if first_id <= 0 or last_id < first_id:
+            raise SystemExit("message ID range must be positive and ordered as START-END")
+        if not args.once:
+            raise SystemExit("--message-id-range requires --once")
+        message_id_range = (first_id, last_id)
+
     session = os.path.expanduser(args.session)
     try:
-        asyncio.run(_listen(args.chat, session, args.once, args.limit))
+        asyncio.run(
+            _listen(
+                args.chat,
+                session,
+                args.once,
+                args.limit,
+                show_all=args.show_all,
+                message_id_range=message_id_range,
+            )
+        )
     except KeyboardInterrupt:
         print("\nStopped.", flush=True)
 
