@@ -202,17 +202,6 @@ class FyersOrderExecutor:
         }
         return self._place_order(order, reason)
 
-
-def ask_live_session() -> bool:
-    """Ask whether this run may place real orders."""
-    while True:
-        answer = input("Is this a live trading session? (y/n): ").strip().lower()
-        if answer in {"y", "yes"}:
-            return True
-        if answer in {"n", "no"}:
-            return False
-        print("Please answer y or n.")
-
     def limit_order(
         self, symbol: str, quantity: int, side: int, limit_price: float, reason: str
     ) -> Any:
@@ -234,6 +223,16 @@ def ask_live_session() -> bool:
         }
         return self._place_order(order, reason)
 
+
+def ask_live_session() -> bool:
+    """Ask whether this run may place real orders."""
+    while True:
+        answer = input("Is this a live trading session? (y/n): ").strip().lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer y or n.")
 
 @dataclass(frozen=True)
 class OrderAction:

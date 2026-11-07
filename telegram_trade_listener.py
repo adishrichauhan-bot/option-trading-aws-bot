@@ -1,0 +1,506 @@
+"""Standalone Telegram trade-call listener and parser.
+
+This module only reads Telegram messages and prints parsed trade calls as JSON.
+It does not call Fyers, place orders, or import the trading engine.
+
+Examples:
+    python telegram_trade_listener.py --parse-file trade_call.txt
+    python telegram_trade_listener.py --chat @my_channel --once --limit 20
+    python telegram_trade_listener.py --chat @my_channel
+
+The Telegram client is imported lazily, so the parser can be used without
+installing Telethon. A Telegram user session is used rather than a bot token.
+The first network run may ask for the phone number, login code, and 2FA password.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import unicodedata
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # Optional for parser-only use.
+    load_dotenv = None  # type: ignore[assignment]
+
+
+DASHES = r"[-\u2013\u2014]"
+NUMBER = r"\d+(?:\.\d+)?"
+INSTRUMENT_RE = re.compile(
+    rf"^(?P<instrument>(?:[A-Z][A-Z0-9_&.-]*)(?::[A-Z0-9_&.-]+)?\s+"
+    rf"{NUMBER}\s+(?:CE|PE))\s*$",
+    re.IGNORECASE,
+)
+SEPARATOR = rf"(?:[:]|{DASHES})"
+RANGE_RE = re.compile(
+    rf"^\s*(?:BUYING\s+RANGE|TRIGGER\s+RANGE)\s*{SEPARATOR}\s*"
+    rf"(?P<low>{NUMBER})\s*{DASHES}\s*(?P<high>{NUMBER})\s*$",
+    re.IGNORECASE,
+)
+TARGET_RE = re.compile(
+    rf"^\s*TARGETS?\s*{SEPARATOR}\s*(?P<values>{NUMBER}(?:\s*,\s*{NUMBER}){{2}})\s*$",
+    re.IGNORECASE,
+)
+STOPLOSS_RE = re.compile(
+    rf"^\s*(?:SL|STOP\s*-?\s*LOSS|STOPLOSS)\s*{SEPARATOR}\s*(?P<value>{NUMBER})\s*$",
+    re.IGNORECASE,
+)
+ANNOUNCEMENT_RE = re.compile(r"^\s*Trade\s+Upcoming\s+Be\s+Ready\s*$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class TradeCallMessage:
+    """A validated trade call extracted from a Telegram message."""
+
+    instrument_name: str
+    trigger_range: tuple[float, float]
+    targets: tuple[float, float, float]
+    stoploss: float
+    raw_text: str
+    message_id: Optional[int] = None
+    chat_id: Optional[int] = None
+    message_date: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["trigger_range"] = list(self.trigger_range)
+        value["targets"] = list(self.targets)
+        return value
+
+
+class TradeCallAssembler:
+    """Reconstruct a trade call sent as multiple Telegram messages."""
+
+    def __init__(self, max_messages: int = 30) -> None:
+        self._chunks: list[tuple[int, str]] = []
+        self._max_messages = max_messages
+
+    def append(self, message_id: int, text: str) -> Optional[TradeCallMessage]:
+        self._chunks.append((message_id, text))
+        self._chunks.sort(key=lambda item: item[0])
+        self._chunks = self._chunks[-self._max_messages :]
+
+        # Try both newline joining (one field per Telegram message) and
+        # direct joining (a message split in the middle of a word/number).
+        for separator in ("\n", " ", ""):
+            combined = separator.join(chunk for _, chunk in self._chunks)
+            candidates = [combined]
+            if separator == "":
+                # Add boundaries when a provider split directly between
+                # fields, e.g. "BUYING" + " RANGE - 160 - 167".
+                with_announcement_boundary = re.sub(
+                    r"(TRADE\s*UPCOMING\s*BE\s*READY)",
+                    r"\n\1\n",
+                    combined,
+                    flags=re.IGNORECASE,
+                )
+                candidates.append(
+                    re.sub(
+                        r"(BUYING\s*RANGE|TRIGGER\s*RANGE|TARGETS?|STOP\s*-?\s*LOSS|STOPLOSS|SL)",
+                        r"\n\1",
+                        with_announcement_boundary,
+                        flags=re.IGNORECASE,
+                    )
+                )
+            for candidate in candidates:
+                call = parse_trade_call(candidate)
+                if call is not None:
+                    self._chunks.clear()
+                    return call
+        return None
+
+    def clear(self) -> None:
+        self._chunks.clear()
+
+
+def _clean_lines(text: str) -> list[str]:
+    cleaned_lines = []
+    for raw_line in text.replace("\r\n", "\n").split("\n"):
+        # Remove emoji, zero-width characters, and other decorative symbols,
+        # while preserving letters, numbers, spaces, commas, and separators.
+        line = "".join(
+            " " if unicodedata.category(char).startswith("C") else char
+            for char in unicodedata.normalize("NFKC", raw_line)
+            if not unicodedata.category(char).startswith(("So", "Sk"))
+        )
+        line = re.sub(r"\s+", " ", line).strip(" \t*_~|>")
+        if line:
+            cleaned_lines.append(line)
+    return cleaned_lines
+
+
+def _find_call_lines(lines: list[str]) -> Optional[tuple[str, str, str, str]]:
+    """Find the four call fields even when a message has extra text."""
+
+    for instrument_index, line in enumerate(lines):
+        if not INSTRUMENT_RE.fullmatch(line):
+            continue
+
+        range_index = next(
+            (index for index in range(instrument_index + 1, len(lines)) if RANGE_RE.fullmatch(lines[index])),
+            None,
+        )
+        if range_index is None:
+            continue
+        target_index = next(
+            (index for index in range(range_index + 1, len(lines)) if TARGET_RE.fullmatch(lines[index])),
+            None,
+        )
+        if target_index is None:
+            continue
+        stoploss_index = next(
+            (index for index in range(target_index + 1, len(lines)) if STOPLOSS_RE.fullmatch(lines[index])),
+            None,
+        )
+        if stoploss_index is not None:
+            return lines[instrument_index], lines[range_index], lines[target_index], lines[stoploss_index]
+    return None
+
+
+def parse_trade_call(text: str) -> Optional[TradeCallMessage]:
+    """Parse one trade call, returning ``None`` for unrelated messages.
+
+    The parser accepts ``BUYING RANGE`` and ``TRIGGER RANGE`` as equivalent,
+    and accepts ``SL``, ``STOP LOSS``, or ``STOPLOSS`` for the final line.
+    """
+
+    raw_text = text.strip()
+    if not raw_text:
+        return None
+
+    lines = _clean_lines(raw_text)
+    call_lines = _find_call_lines(lines)
+    if call_lines is None:
+        return None
+
+    instrument_match = INSTRUMENT_RE.fullmatch(call_lines[0])
+    range_match = RANGE_RE.fullmatch(call_lines[1])
+    target_match = TARGET_RE.fullmatch(call_lines[2])
+    stoploss_match = STOPLOSS_RE.fullmatch(call_lines[3])
+    if not all((instrument_match, range_match, target_match, stoploss_match)):
+        return None
+
+    instrument = instrument_match.group("instrument").upper()
+    trigger_low = float(range_match.group("low"))
+    trigger_high = float(range_match.group("high"))
+    targets = tuple(float(value) for value in target_match.group("values").split(","))
+    stoploss = float(stoploss_match.group("value"))
+
+    if trigger_low > trigger_high:
+        raise ValueError("trigger range lower bound must not exceed upper bound")
+    if not all(first < second for first, second in zip(targets, targets[1:])):
+        raise ValueError("targets must be strictly increasing")
+    if targets[0] <= trigger_high:
+        raise ValueError("the first target must be above the trigger range")
+    if stoploss >= trigger_low:
+        raise ValueError("stop-loss must be below the trigger range")
+
+    return TradeCallMessage(
+        instrument_name=instrument,
+        trigger_range=(trigger_low, trigger_high),
+        targets=targets,  # type: ignore[arg-type]
+        stoploss=stoploss,
+        raw_text=raw_text,
+    )
+
+
+def _json_line(call: TradeCallMessage) -> str:
+    return json.dumps(call.to_dict(), separators=(",", ":"), sort_keys=True)
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"missing required environment variable: {name}")
+    return value
+
+
+def _prepare_session_path(session: str) -> str:
+    """Create the directory needed by Telethon's SQLite session file."""
+
+    session_path = Path(session).expanduser()
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    return str(session_path)
+
+
+def _phone_session_name(phone: str | None) -> str:
+    """Return a stable, filesystem-safe default session name for a phone."""
+
+    digits = re.sub(r"\D", "", phone or "")
+    return f"trade_listener_{digits}" if digits else "trade_listener"
+
+
+def _default_session() -> str:
+    """Use a different Telethon session for each configured Telegram account."""
+
+    configured = os.getenv("TELEGRAM_SESSION")
+    if configured:
+        return configured
+    return str(Path("~/.telegram") / _phone_session_name(os.getenv("TELEGRAM_PHONE")))
+
+
+def _phone_digits(phone: str | None) -> str:
+    return re.sub(r"\D", "", phone or "")
+
+
+def _build_client(session: str):
+    try:
+        from telethon import TelegramClient
+    except ImportError as exc:
+        raise RuntimeError(
+            "Telethon is required for Telegram access. Install it with: "
+            "python -m pip install telethon"
+        ) from exc
+
+    try:
+        api_id = int(_required_env("TELEGRAM_API_ID"))
+    except ValueError as exc:
+        raise RuntimeError("TELEGRAM_API_ID must be an integer") from exc
+    api_hash = _required_env("TELEGRAM_API_HASH")
+    phone = os.getenv("TELEGRAM_PHONE") or None
+    return TelegramClient(_prepare_session_path(session), api_id, api_hash), phone
+
+
+async def _resolve_chat(client: Any, chat_ref: str) -> Any:
+    """Resolve a username/ID, or a visible Telegram dialog title."""
+
+    reference = chat_ref.strip()
+    if re.fullmatch(r"-?\d+", reference):
+        numeric_id = int(reference)
+        # Dialogs contain the access hash needed for private users/chats.
+        async for dialog in client.iter_dialogs():
+            if dialog.id == numeric_id:
+                return dialog.entity
+        try:
+            return await client.get_entity(numeric_id)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"Telegram numeric chat ID {numeric_id} is not available in this account's dialogs. "
+                "Run --list-dialogs using the same session and use the exact ID shown there."
+            ) from exc
+
+    try:
+        return await client.get_entity(reference)
+    except (ValueError, TypeError):
+        title = reference.lstrip("@").strip()
+        async for dialog in client.iter_dialogs():
+            if dialog.name and dialog.name.casefold() == title.casefold():
+                return dialog.entity
+        raise ValueError(
+            f"Telegram chat {chat_ref!r} was not found. Use its exact @username, "
+            "numeric chat ID, or visible dialog name."
+        )
+
+
+async def _read_recent(
+    client: Any,
+    entity: Any,
+    limit: int,
+    on_trade_call: Callable[[TradeCallMessage], None] | None = None,
+) -> None:
+    messages = [message async for message in client.iter_messages(entity, limit=limit)]
+    assembler = TradeCallAssembler()
+    for message in reversed(messages):
+        await _process_message(message, assembler, set(), on_trade_call)
+
+
+async def _process_message(
+    message: Any,
+    assembler: TradeCallAssembler,
+    seen_ids: set[int],
+    on_trade_call: Callable[[TradeCallMessage], None] | None = None,
+) -> None:
+    """Append one message chunk and print only completed trade calls."""
+
+    message_id = message.id
+    if message_id in seen_ids:
+        return
+    seen_ids.add(message_id)
+
+    raw_text = message.raw_text or ""
+    print(f"Received message id={message_id}; appending chunk...", flush=True)
+    call = assembler.append(message_id, raw_text)
+    if call is None:
+        print("Trade call incomplete; waiting for the next chunk.", flush=True)
+        return
+
+    call = TradeCallMessage(
+        **{
+            **call.__dict__,
+            "message_id": message_id,
+            "chat_id": getattr(message, "chat_id", None),
+            "message_date": message.date.isoformat() if message.date else None,
+        }
+    )
+    print("Trade call completed.", flush=True)
+    print(_json_line(call), flush=True)
+    if on_trade_call is not None:
+        on_trade_call(call)
+
+
+async def _listen(
+    chat_ref: str,
+    session: str,
+    once: bool,
+    limit: int,
+    on_trade_call: Callable[[TradeCallMessage], None] | None = None,
+    stop_event: Any | None = None,
+) -> None:
+    from telethon import events
+    from telethon.utils import get_peer_id
+
+    client, phone = _build_client(session)
+    async with client:
+        if not await client.is_user_authorized():
+            phone = phone or input("Telegram phone number with country code: ").strip()
+            if not phone:
+                raise RuntimeError(
+                    "A phone number is required for the first Telegram login. "
+                    "Set TELEGRAM_PHONE or enter it when prompted."
+                )
+        await client.start(phone=phone)
+        account = await client.get_me()
+        configured_phone = _phone_digits(phone)
+        logged_in_phone = _phone_digits(getattr(account, "phone", None))
+        if configured_phone and logged_in_phone and configured_phone != logged_in_phone:
+            session_file = f"{_prepare_session_path(session)}.session"
+            raise RuntimeError(
+                f"Telegram session belongs to +{logged_in_phone}, not +{configured_phone}. "
+                "Set TELEGRAM_SESSION to a new path (or remove the stale session file) and log in again. "
+                f"Current session file: {session_file}"
+            )
+        entity = await _resolve_chat(client, chat_ref)
+        if once:
+            await _read_recent(client, entity, limit, on_trade_call)
+            return
+
+        seen_ids: set[int] = set()
+        assembler = TradeCallAssembler()
+        latest_messages = await client.get_messages(entity, limit=1)
+        latest_id = latest_messages[0].id if latest_messages else 0
+        account_name = " ".join(
+            part for part in (getattr(account, "first_name", None), getattr(account, "last_name", None)) if part
+        ) or getattr(account, "username", None) or str(getattr(account, "id", "unknown"))
+
+        target_chat_id = get_peer_id(entity)
+
+        @client.on(events.NewMessage())
+        async def handle_message(event: Any) -> None:
+            if event.chat_id != target_chat_id:
+                return
+            await _process_message(event.message, assembler, seen_ids, on_trade_call)
+
+        print(
+            f"Logged in as {account_name}; target chat={chat_ref}; chat_id={target_chat_id}. "
+            f"Polling every 2 seconds; last message id={latest_id}. Press Ctrl+C to stop.",
+            flush=True,
+        )
+
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return
+            # Fetch the newest messages and compare locally. This is more
+            # reliable than combining min_id with reverse pagination across
+            # different Telegram chat types.
+            recent_messages = await client.get_messages(entity, limit=20)
+            for message in reversed(recent_messages):
+                if message.id <= latest_id:
+                    continue
+                latest_id = max(latest_id, message.id)
+                await _process_message(message, assembler, seen_ids, on_trade_call)
+            await asyncio.sleep(2)
+
+
+async def listen_for_trade_calls(
+    chat_ref: str,
+    session: str,
+    on_trade_call: Callable[[TradeCallMessage], None],
+    stop_event: Any | None = None,
+) -> None:
+    """Continuously deliver completed Telegram trade calls to a callback."""
+
+    await _listen(
+        chat_ref,
+        session,
+        once=False,
+        limit=50,
+        on_trade_call=on_trade_call,
+        stop_event=stop_event,
+    )
+
+
+async def _list_dialogs(session: str) -> None:
+    """Print dialog titles and IDs to identify the correct Telegram chat."""
+
+    client, phone = _build_client(session)
+    async with client:
+        if not await client.is_user_authorized():
+            phone = phone or input("Telegram phone number with country code: ").strip()
+            if not phone:
+                raise RuntimeError("A phone number is required for the first Telegram login")
+        await client.start(phone=phone)
+        account = await client.get_me()
+        name = " ".join(
+            part for part in (getattr(account, "first_name", None), getattr(account, "last_name", None)) if part
+        ) or getattr(account, "username", None) or str(getattr(account, "id", "unknown"))
+        print(f"Logged in as: {name}")
+        async for dialog in client.iter_dialogs(limit=200):
+            print(f"{dialog.id}\t{dialog.name}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chat", default=os.getenv("TELEGRAM_CHAT"), help="Telegram username, ID, or 'me'")
+    parser.add_argument(
+        "--session",
+        default=_default_session(),
+        help="Telethon session path; keep the generated .session file private",
+    )
+    parser.add_argument("--once", action="store_true", help="Parse recent messages and exit")
+    parser.add_argument("--limit", type=int, default=50, help="Number of recent messages for --once")
+    parser.add_argument("--list-dialogs", action="store_true", help="List available chats and exit")
+    parser.add_argument("--parse-file", type=Path, help="Parse a local message file without Telegram")
+    return parser.parse_args()
+
+
+def main() -> None:
+    if load_dotenv is not None:
+        load_dotenv()
+    args = _parse_args()
+
+    if args.list_dialogs:
+        session = os.path.expanduser(args.session)
+        try:
+            asyncio.run(_list_dialogs(session))
+        except KeyboardInterrupt:
+            print("\nStopped.", flush=True)
+        return
+
+    if args.parse_file:
+        call = parse_trade_call(args.parse_file.read_text(encoding="utf-8"))
+        if call is None:
+            raise SystemExit("file does not contain a recognized trade call")
+        print(_json_line(call))
+        return
+
+    if not args.chat:
+        raise SystemExit("provide --chat or set TELEGRAM_CHAT")
+    if args.limit < 1:
+        raise SystemExit("--limit must be at least 1")
+
+    session = os.path.expanduser(args.session)
+    try:
+        asyncio.run(_listen(args.chat, session, args.once, args.limit))
+    except KeyboardInterrupt:
+        print("\nStopped.", flush=True)
+
+
+if __name__ == "__main__":
+    main()

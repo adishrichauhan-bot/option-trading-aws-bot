@@ -7,11 +7,14 @@ session before connecting to the order path.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
 import time
+from queue import Queue
 from pathlib import Path
+from threading import Event, Thread
 
 from market_data_ws import FyersMarketDataSocket
 from trading import (
@@ -23,6 +26,7 @@ from trading import (
     parse_trade_call,
     resolve_option_symbol,
 )
+from telegram_trade_listener import TradeCallMessage, listen_for_trade_calls
 
 
 def _positive_int(value: str, label: str) -> int:
@@ -74,15 +78,76 @@ def read_quantity(value: int | None, label: str, env_name: str) -> int:
     return _positive_int(raw, label)
 
 
+def telegram_call_to_signal(call: TradeCallMessage) -> str:
+    """Convert a validated Telegram call to the trading parser's format."""
+
+    low, high = call.trigger_range
+    targets = ", ".join(f"{target:g}" for target in call.targets)
+    return "\n".join(
+        [
+            call.instrument_name,
+            f"TRIGGER RANGE - {low:g} - {high:g}",
+            f"TARGET - {targets}",
+            f"SL - {call.stoploss:g}",
+        ]
+    )
+
+
+def _telegram_worker(
+    chat: str,
+    session: str,
+    calls: Queue[TradeCallMessage | BaseException],
+    stop_event: Event,
+) -> None:
+    def on_trade_call(call: TradeCallMessage) -> None:
+        calls.put(call)
+
+    try:
+        asyncio.run(listen_for_trade_calls(chat, session, on_trade_call, stop_event))
+    except BaseException as exc:  # Forward listener failures to the main thread.
+        calls.put(exc)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the simple Fyers trade assistant")
     parser.add_argument("--signal-file", type=Path, help="Optional file containing a trade call")
+    parser.add_argument(
+        "--telegram-chat",
+        default=os.getenv("TELEGRAM_CHAT"),
+        help="Read the first completed trade call from this Telegram chat",
+    )
+    parser.add_argument(
+        "--telegram-session",
+        default=os.getenv("TELEGRAM_SESSION", "~/.telegram/trade_listener"),
+        help="Telethon session path for --telegram-chat",
+    )
     parser.add_argument("--quantity", type=int, help="Total quantity; otherwise prompt or read FYERS_QUANTITY")
     parser.add_argument("--lot-size", type=int, help="Lot size; otherwise prompt or read FYERS_LOT_SIZE")
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
     args = parser.parse_args()
 
-    signal = parse_trade_call(read_signal(args.signal_file))
+    telegram_thread: Thread | None = None
+    telegram_stop = Event()
+    if args.telegram_chat:
+        calls: Queue[TradeCallMessage | BaseException] = Queue()
+        telegram_thread = Thread(
+            target=_telegram_worker,
+            args=(args.telegram_chat, args.telegram_session, calls, telegram_stop),
+            name="telegram-trade-listener",
+            daemon=True,
+        )
+        print(f"Waiting for a complete trade call from Telegram chat {args.telegram_chat}...")
+        telegram_thread.start()
+        item = calls.get()
+        telegram_stop.set()
+        if isinstance(item, BaseException):
+            raise item
+        signal_text = telegram_call_to_signal(item)
+        print("Telegram trade call accepted as the trading-engine input.")
+    else:
+        signal_text = read_signal(args.signal_file)
+
+    signal = parse_trade_call(signal_text)
     quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY")
     lot_size = read_quantity(args.lot_size, "Lot size", "FYERS_LOT_SIZE")
     max_quantity = int(os.getenv("FYERS_MAX_QUANTITY", "10000"))
@@ -136,6 +201,10 @@ def main() -> None:
                 time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nMonitoring stopped. Any broker position remains open; verify it in Fyers.")
+    finally:
+        telegram_stop.set()
+        if telegram_thread is not None:
+            telegram_thread.join(timeout=3)
 
 
 if __name__ == "__main__":
