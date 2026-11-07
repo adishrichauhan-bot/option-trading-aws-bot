@@ -170,8 +170,17 @@ class FyersOrderExecutor:
         self.product_type = os.getenv("FYERS_PRODUCT_TYPE", "INTRADAY")
 
     def _place_order(self, order: dict[str, Any], reason: str) -> Any:
+        order_type = "LIMIT" if order["type"] == 1 else "MARKET"
+        side = "BUY" if order["side"] == 1 else "SELL"
+        limit_price = order.get("limitPrice", 0)
+        price_text = f" limit_price={limit_price:g}" if order_type == "LIMIT" else ""
+        print(
+            f"ORDER SUBMIT: {order_type} {side} quantity={order['qty']} "
+            f"symbol={order['symbol']}{price_text} reason={reason}",
+            flush=True,
+        )
         if not self.live:
-            print(json.dumps({"dry_run": True, "reason": reason, "order": order}))
+            print(json.dumps({"dry_run": True, "reason": reason, "order": order}), flush=True)
             return {"s": "dry_run", "order": order}
         print(
             f"LIVE ORDER: {reason}: side={order['side']} "

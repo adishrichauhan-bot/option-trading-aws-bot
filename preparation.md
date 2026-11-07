@@ -512,6 +512,15 @@ ENTRY PRICING: LTP=168 ATR_1m=... buffer=... limit=...
 The ATR period can be configured with `FYERS_ATR_PERIOD`; the default is 14
 completed one-minute bars.
 
+When an entry is submitted, the terminal prints an explicit order line such as:
+
+```text
+ORDER SUBMIT: LIMIT BUY quantity=100 symbol=... limit_price=380.5 reason=trigger range crossed
+```
+
+This makes the exact limit price visible for both dry-run and live order
+submissions. The following JSON line also contains the broker payload.
+
 ## Display recent Telegram messages
 
 To display all of the latest 100 messages from the default chat configured in
