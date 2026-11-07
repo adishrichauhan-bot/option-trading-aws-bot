@@ -16,7 +16,7 @@ from queue import Queue
 from pathlib import Path
 from threading import Event, Thread
 
-from market_data_ws import FyersMarketDataSocket
+from market_data_ws import FyersMarketDataSocket, MockMarketDataSocket
 from trading import (
     BreakoutTrader,
     FyersOrderExecutor,
@@ -108,6 +108,25 @@ def _telegram_worker(
         calls.put(exc)
 
 
+def _mock_price_sequence(signal: object, raw_prices: str | None) -> list[float]:
+    if raw_prices:
+        try:
+            prices = [float(value.strip()) for value in raw_prices.split(",") if value.strip()]
+        except ValueError as exc:
+            raise ValueError("--mock-prices must be comma-separated positive numbers") from exc
+        if not prices or any(price <= 0 for price in prices):
+            raise ValueError("--mock-prices must contain positive numbers")
+        return prices
+
+    trigger_range = getattr(signal, "trigger_range", None)
+    entry = getattr(signal, "buy_above")
+    targets = getattr(signal, "targets")
+    start = trigger_range[0] if trigger_range else max(0.01, entry - 1)
+    crossing_price = trigger_range[1] + 1 if trigger_range else entry + 1
+    # The default sequence enters and crosses all three targets.
+    return [start, crossing_price, targets[0] + 1, targets[1] + 1, targets[2] + 1]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the simple Fyers trade assistant")
     parser.add_argument("--signal-file", type=Path, help="Optional file containing a trade call")
@@ -120,6 +139,15 @@ def main() -> None:
         "--telegram-session",
         default=os.getenv("TELEGRAM_SESSION", "~/.telegram/trade_listener"),
         help="Telethon session path for --telegram-chat",
+    )
+    parser.add_argument(
+        "--mock-market",
+        action="store_true",
+        help="Use deterministic dry-run prices instead of Fyers market data",
+    )
+    parser.add_argument(
+        "--mock-prices",
+        help="Optional comma-separated mock prices, for example 160,168,150",
     )
     parser.add_argument("--quantity", type=int, help="Total quantity; otherwise prompt or read FYERS_QUANTITY")
     parser.add_argument("--lot-size", type=int, help="Lot size; otherwise prompt or read FYERS_LOT_SIZE")
@@ -156,8 +184,12 @@ def main() -> None:
     if quantity % lot_size:
         raise ValueError(f"Quantity must be a multiple of the lot size ({lot_size})")
 
-    live = ask_live_session()
-    mode = "LIVE" if live else "DRY RUN"
+    if args.mock_market:
+        live = False
+        print("Mock market mode enabled; live orders are disabled.")
+    else:
+        live = ask_live_session()
+    mode = "MOCK DRY RUN" if args.mock_market else ("LIVE" if live else "DRY RUN")
     print("\nTrade preflight")
     print(json.dumps({
         "instrument": signal.instrument_name,
@@ -170,12 +202,18 @@ def main() -> None:
         "mode": mode,
     }, indent=2, default=str))
 
-    client_id, access_token = authenticated_credentials()
-    client = authenticated_client()
-    symbol = resolve_option_symbol(client, signal)
-    print(f"Resolved Fyers symbol: {symbol}")
-
-    stream = FyersMarketDataSocket(client_id, access_token)
+    client = None
+    if args.mock_market:
+        symbol = f"MOCK:{signal.instrument_name}"
+        prices = _mock_price_sequence(signal, args.mock_prices)
+        stream = MockMarketDataSocket(prices, interval=args.interval)
+        print(f"Mock prices: {prices}")
+    else:
+        client_id, access_token = authenticated_credentials()
+        client = authenticated_client()
+        symbol = resolve_option_symbol(client, signal)
+        print(f"Resolved Fyers symbol: {symbol}")
+        stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])
     trader = BreakoutTrader(
         signal,
@@ -184,7 +222,11 @@ def main() -> None:
         lot_size,
         FyersOrderExecutor(client, live=live),
     )
-    print("Waiting for a WebSocket breakout tick. Press Ctrl+C to stop monitoring.")
+    print(
+        "Waiting for mock breakout ticks."
+        if args.mock_market
+        else "Waiting for a WebSocket breakout tick. Press Ctrl+C to stop monitoring."
+    )
 
     try:
         while not trader.closed:
@@ -199,6 +241,8 @@ def main() -> None:
                 print(f"ACTION: {action.reason} quantity={action.quantity} price={action.price}")
             if args.interval > 0:
                 time.sleep(args.interval)
+    except StopIteration as exc:
+        print(f"Mock market test finished: {exc}")
     except KeyboardInterrupt:
         print("\nMonitoring stopped. Any broker position remains open; verify it in Fyers.")
     finally:

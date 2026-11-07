@@ -118,3 +118,26 @@ class FyersMarketDataSocket:
                 raise TimeoutError(f"No new WebSocket market-data message received for {symbol}")
             event.wait(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
             event.clear()
+
+
+class MockMarketDataSocket:
+    """Deterministic market-data source for offline strategy tests."""
+
+    def __init__(self, prices: list[float], interval: float = 0.0) -> None:
+        if not prices or any(price <= 0 for price in prices):
+            raise ValueError("Mock prices must contain at least one positive price")
+        self._prices = iter(prices)
+        self._interval = max(0.0, interval)
+
+    def subscribe(self, symbols: Iterable[str]) -> None:
+        """Match the live socket interface; no network connection is made."""
+
+    def wait_for_update(self, symbol: str, timeout: float = 10.0) -> dict[str, Any]:
+        del timeout
+        if self._interval:
+            time.sleep(self._interval)
+        try:
+            price = next(self._prices)
+        except StopIteration as exc:
+            raise StopIteration("Mock market-data sequence is complete") from exc
+        return {"symbol": symbol, "ltp": price, "mock": True}
