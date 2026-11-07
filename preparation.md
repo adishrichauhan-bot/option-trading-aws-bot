@@ -174,19 +174,20 @@ vi trade_call.txt
 Test parsing without API access:
 
 ```bash
-python trading.py trade_call.txt --quantity 750 --lot-size 75 --parse-only
+python trading.py trade_call.txt --parse-only
 ```
 
 Run dry-run trading:
 
 ```bash
-python trading.py trade_call.txt --quantity 750 --lot-size 75 --interval 2
+python trading.py trade_call.txt --interval 2
 ```
 
-The direct strategy command asks whether this is a live trading session:
+Live mode is automatic: it is enabled Monday-Friday from 09:00 through 15:40
+IST, inclusive. At all other times the order executor uses dry-run mode:
 
 ```bash
-python trading.py trade_call.txt --quantity 750 --lot-size 75 --interval 2
+python trading.py trade_call.txt --interval 2
 ```
 
 ## End-of-day shutdown
@@ -230,9 +231,9 @@ To commit these notes run: `git status`; `git add preparation.md`; `git diff --c
 
 ## Simple live-trader entry point
 
-Use [`live_trader.py`](./live_trader.py) as the single interactive entry
-point. It prompts for the trade call, quantity, and lot size, resolves the
-exact Fyers option symbol, prints a preflight summary, and starts the existing
+Use [`live_trader.py`](./live_trader.py) as the single entry point. It prompts
+for the trade call, reads quantity and lot size from `.env`, resolves the exact
+Fyers option symbol, prints a preflight summary, and starts the existing
 WebSocket strategy.
 
 Start in dry-run mode:
@@ -246,18 +247,19 @@ python live_trader.py
 Alternatively, provide a signal file and values directly:
 
 ```bash
-python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75
+python live_trader.py --signal-file trade_call.txt
 ```
 
-The interactive entry point asks `Is this a live trading session? (y/n):`:
+Live mode is selected automatically using the Monday-Friday 09:00-15:40 IST
+window; no live-session confirmation is requested:
 
 ```bash
-python live_trader.py --signal-file trade_call.txt --quantity 750 --lot-size 75
+python live_trader.py --signal-file trade_call.txt
 ```
 
 Optional environment defaults are `FYERS_QUANTITY`, `FYERS_LOT_SIZE`,
 `FYERS_PRODUCT_TYPE`, and `FYERS_MAX_QUANTITY`. The default maximum quantity
-is 10,000. Pressing `Ctrl+C` stops monitoring; it does not silently close a
+is 10,000; quantity and lot-size defaults are 100 and 10. Pressing `Ctrl+C` stops monitoring; it does not silently close a
 broker position, so verify any open position in Fyers.
 
 ## Fyers WebSocket market data
@@ -367,9 +369,7 @@ python -m pip install -r requirements.txt
 python -m pip check
 
 python live_trader.py \
-  --telegram-session "$TELEGRAM_SESSION" \
-  --quantity 100 \
-  --lot-size 10
+  --telegram-session "$TELEGRAM_SESSION"
 ```
 
 `live_trader.py` reads `TELEGRAM_CHAT` automatically. Do not pass a literal
@@ -404,9 +404,7 @@ Run the integrated engine inside tmux:
 cd ~/option-trading-aws-bot
 source .venv/bin/activate
 python live_trader.py \
-  --telegram-session "$TELEGRAM_SESSION" \
-  --quantity 100 \
-  --lot-size 10
+  --telegram-session "$TELEGRAM_SESSION"
 ```
 
 Detach without stopping the process with `Ctrl+B`, then `D`. Reattach with:
@@ -431,8 +429,6 @@ source .venv/bin/activate
 python live_trader.py \
   --telegram-session "$TELEGRAM_SESSION" \
   --mock-market \
-  --quantity 100 \
-  --lot-size 10 \
   --interval 0.5
 ```
 
@@ -452,9 +448,7 @@ stop-loss values. For a trigger range of `160 - 167` and stop-loss `150`:
 python live_trader.py \
   --telegram-session "$TELEGRAM_SESSION" \
   --mock-market \
-  --mock-prices "160,168,149" \
-  --quantity 100 \
-  --lot-size 10
+  --mock-prices "160,168,149"
 ```
 
 Expected behavior is entry after the trigger crossing followed by a full

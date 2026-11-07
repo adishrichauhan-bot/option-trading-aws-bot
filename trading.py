@@ -234,15 +234,28 @@ class FyersOrderExecutor:
         return self._place_order(order, reason)
 
 
+# India has a fixed UTC+05:30 offset and does not observe daylight saving time.
+INDIA_TIMEZONE = dt.timezone(dt.timedelta(hours=5, minutes=30), name="IST")
+LIVE_MARKET_START = dt.time(9, 0)
+LIVE_MARKET_END = dt.time(15, 40)
+
+
+def is_live_trading_window(now: dt.datetime | None = None) -> bool:
+    """Return whether automatic live trading is allowed at the current IST time.
+
+    The live window is Monday-Friday, 09:00:00 through 15:40:00 IST,
+    inclusive. A datetime argument is supported for deterministic tests.
+    """
+    current = now or dt.datetime.now(INDIA_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=INDIA_TIMEZONE)
+    current = current.astimezone(INDIA_TIMEZONE)
+    return current.weekday() < 5 and LIVE_MARKET_START <= current.time() <= LIVE_MARKET_END
+
+
 def ask_live_session() -> bool:
-    """Ask whether this run may place real orders."""
-    while True:
-        answer = input("Is this a live trading session? (y/n): ").strip().lower()
-        if answer in {"y", "yes"}:
-            return True
-        if answer in {"n", "no"}:
-            return False
-        print("Please answer y or n.")
+    """Backward-compatible name for the automatic live-session decision."""
+    return is_live_trading_window()
 
 @dataclass(frozen=True)
 class OrderAction:
@@ -556,8 +569,18 @@ def authenticated_client() -> Any:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the breakout target/stop strategy")
     parser.add_argument("signal_file", type=Path, help="Text file containing the trade call")
-    parser.add_argument("--quantity", type=int, required=True, help="Total option quantity")
-    parser.add_argument("--lot-size", type=int, required=True, help="Contract lot size")
+    parser.add_argument(
+        "--quantity",
+        type=int,
+        default=None,
+        help="Optional quantity override; otherwise FYERS_QUANTITY (default: 100)",
+    )
+    parser.add_argument(
+        "--lot-size",
+        type=int,
+        default=None,
+        help="Optional lot-size override; otherwise FYERS_LOT_SIZE (default: 10)",
+    )
     parser.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds")
     parser.add_argument(
         "--parse-only", action="store_true", help="Parse and print the signal without API access"
@@ -569,14 +592,22 @@ def main() -> None:
         print(json.dumps(asdict(trade_call)))
         return
 
-    live = ask_live_session()
+    quantity = int(os.getenv("FYERS_QUANTITY", "100")) if args.quantity is None else args.quantity
+    lot_size = int(os.getenv("FYERS_LOT_SIZE", "10")) if args.lot_size is None else args.lot_size
+    if quantity <= 0 or lot_size <= 0:
+        raise ValueError("FYERS_QUANTITY and FYERS_LOT_SIZE must be greater than zero")
+    live = is_live_trading_window()
+    print(
+        "Automatic session mode: "
+        f"{'LIVE' if live else 'DRY RUN'} (weekdays, 09:00-15:40 IST)."
+    )
     client_id, access_token = authenticated_credentials()
     client = authenticated_client()
     symbol = resolve_option_symbol(client, trade_call)
     print(json.dumps({"signal": trade_call.__dict__, "symbol": symbol, "live": live}, default=str))
 
     trader = BreakoutTrader(
-        trade_call, symbol, args.quantity, args.lot_size, FyersOrderExecutor(client, live=live)
+        trade_call, symbol, quantity, lot_size, FyersOrderExecutor(client, live=live)
     )
     stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])

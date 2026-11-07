@@ -1,7 +1,7 @@
-"""Simple interactive entry point for the Fyers breakout strategy.
+"""Entry point for the Fyers breakout strategy.
 
-Dry-run is the default. The program asks whether this is a live trading
-session before connecting to the order path.
+Quantity and lot size are read from the environment. Live mode is enabled
+automatically only during the India-market weekday window.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ from market_data_ws import FyersMarketDataSocket, MockMarketDataSocket
 from trading import (
     BreakoutTrader,
     FyersOrderExecutor,
-    ask_live_session,
     authenticated_client,
     authenticated_credentials,
+    is_live_trading_window,
     parse_trade_call,
     resolve_option_symbol,
 )
@@ -71,10 +71,10 @@ def normalize_interactive_signal(lines: list[str]) -> str:
     return "\n".join([instrument, buy_line, target_line, stoploss_line])
 
 
-def read_quantity(value: int | None, label: str, env_name: str) -> int:
+def read_quantity(value: int | None, label: str, env_name: str, default: int) -> int:
     raw = str(value) if value is not None else os.getenv(env_name)
     if raw is None:
-        raw = input(f"{label}: ").strip()
+        raw = str(default)
     return _positive_int(raw, label)
 
 
@@ -149,8 +149,16 @@ def main() -> None:
         "--mock-prices",
         help="Optional comma-separated mock prices, for example 160,168,150",
     )
-    parser.add_argument("--quantity", type=int, help="Total quantity; otherwise prompt or read FYERS_QUANTITY")
-    parser.add_argument("--lot-size", type=int, help="Lot size; otherwise prompt or read FYERS_LOT_SIZE")
+    parser.add_argument(
+        "--quantity",
+        type=int,
+        help="Optional quantity override; otherwise FYERS_QUANTITY (default: 100)",
+    )
+    parser.add_argument(
+        "--lot-size",
+        type=int,
+        help="Optional lot-size override; otherwise FYERS_LOT_SIZE (default: 10)",
+    )
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
     args = parser.parse_args()
 
@@ -176,8 +184,8 @@ def main() -> None:
         signal_text = read_signal(args.signal_file)
 
     signal = parse_trade_call(signal_text)
-    quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY")
-    lot_size = read_quantity(args.lot_size, "Lot size", "FYERS_LOT_SIZE")
+    quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY", default=100)
+    lot_size = read_quantity(args.lot_size, "Lot size", "FYERS_LOT_SIZE", default=10)
     max_quantity = int(os.getenv("FYERS_MAX_QUANTITY", "10000"))
     if quantity > max_quantity:
         raise ValueError(f"Quantity {quantity} exceeds FYERS_MAX_QUANTITY={max_quantity}")
@@ -188,7 +196,11 @@ def main() -> None:
         live = False
         print("Mock market mode enabled; live orders are disabled.")
     else:
-        live = ask_live_session()
+        live = is_live_trading_window()
+        print(
+            "Automatic session mode: "
+            f"{'LIVE' if live else 'DRY RUN'} (weekdays, 09:00-15:40 IST)."
+        )
     mode = "MOCK DRY RUN" if args.mock_market else ("LIVE" if live else "DRY RUN")
     print("\nTrade preflight")
     print(json.dumps({
