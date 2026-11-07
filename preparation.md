@@ -359,6 +359,217 @@ first completed Telegram call, converts it into the existing `TradeCall`
 format, resolves the Fyers option symbol, and starts the breakout state
 machine. The listener itself does not place orders.
 
+### Integration review
+
+The live path is:
+
+```text
+Telegram message chunks
+  -> TradeCallAssembler
+  -> validated TradeCallMessage
+  -> live_trader.py conversion
+  -> trading.py parse_trade_call
+  -> Fyers option-symbol resolution
+  -> Fyers market-data WebSocket
+  -> BreakoutTrader state machine
+  -> FyersOrderExecutor
+```
+
+The parser and engine were syntax-checked after the integration changes. The
+following functional and technical risks remain and should be understood
+before live use:
+
+1. **High — limit-order fill is not confirmed.** For a trigger-range entry,
+   the engine marks the trade as entered after Fyers accepts the limit-order
+   request. It does not poll the order status or confirm a fill. If the order
+   remains pending or is partially filled, target and stop-loss actions may not
+   match the actual broker position.
+2. **High — one trade per process.** After target 3 or stop-loss closes the
+   state machine, `live_trader.py` exits. Restart it before handling another
+   trade call.
+3. **High — only new Telegram messages are consumed after startup.** The
+   listener records the latest message ID when it starts, so a call sent before
+   startup is intentionally ignored. Start the engine before the signal is
+   published.
+4. **High — no restart reconciliation.** The engine does not restore an open
+   position after a crash or reboot. Check Fyers positions and open orders
+   before restarting after any interruption to avoid duplicate entries or
+   exits.
+5. **High — automatic live mode is time-only.** Weekdays from 09:00 through
+   15:40 IST are treated as live, including exchange holidays and unusual
+   sessions. Outside that window the engine is dry-run; `--mock-market` is
+   always dry-run.
+6. **Medium — market-data timeout stops the process.** If no newer WebSocket
+   tick arrives within the socket timeout, the exception is not recovered by
+   the main loop. Confirm the process is still running and inspect the last
+   terminal output.
+7. **Medium — Telegram sessions are account-specific.** Changing Telegram
+   credentials while reusing an old session can keep the old account logged
+   in. Use a new `TELEGRAM_SESSION` path and verify the account with
+   `--list-dialogs`.
+8. **Medium — a live order error stops the engine.** A rejected order raises
+   an exception. Treat the broker order book and positions as authoritative
+   and perform a manual safety check before any restart.
+
+Do not treat a terminal line saying that an order was submitted as proof that
+the position is filled. Verify the order and position in Fyers.
+
+## Morning live-market startup — beginner runbook
+
+Use this sequence each trading morning. The commands below assume Amazon Linux,
+the repository at `~/option-trading-aws-bot`, and a configured `.env`.
+
+### 1. Start EC2 and connect
+
+1. In AWS Console, start the EC2 instance.
+2. Wait for `Running` and both status checks to pass.
+3. Copy the current public IPv4 address. It may change after a stop/start.
+4. From Windows PowerShell, connect using the current address:
+
+```powershell
+ssh -i "C:/Users/prabh/Downloads/aws-asus-option-trad-pem.pem" ec2-user@CURRENT_PUBLIC_IP
+```
+
+Replace `CURRENT_PUBLIC_IP`; do not type the placeholder literally.
+
+### 2. Update the code and activate Python
+
+Run these commands after SSH connects:
+
+```bash
+cd ~/option-trading-aws-bot
+git status --short
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip check
+```
+
+If `git status --short` shows local edits, stop and inspect them before
+pulling. Do not overwrite them blindly.
+
+### 3. Check the non-secret configuration
+
+Confirm that the values exist without printing Fyers secrets:
+
+```bash
+grep -E '^(TELEGRAM_CHAT|TELEGRAM_SESSION|FYERS_QUANTITY|FYERS_LOT_SIZE)=' .env
+```
+
+The expected trading defaults are:
+
+```text
+FYERS_QUANTITY=100
+FYERS_LOT_SIZE=10
+```
+
+Change them in `.env` only when required, and make sure quantity is a multiple
+of lot size. Do not commit `.env`.
+
+### 4. Verify Fyers authentication
+
+Check whether the token cache exists:
+
+```bash
+test -s ~/.fyers/token.json && echo "Fyers token cache found" || echo "Fyers token cache missing"
+```
+
+If it is missing or expired, run:
+
+```bash
+python auth.py
+```
+
+Complete the displayed login flow and confirm that the token cache is created
+before continuing.
+
+### 5. Verify the Telegram account and chat
+
+Run:
+
+```bash
+python telegram_trade_listener.py --list-dialogs
+```
+
+Check the `Logged in as:` line and confirm that the configured chat appears.
+If the account is wrong, use a new session path before continuing:
+
+```bash
+export TELEGRAM_SESSION="$HOME/.telegram/trade_listener_correct_account"
+python telegram_trade_listener.py --list-dialogs
+```
+
+Use the exact chat ID or visible chat configured in `TELEGRAM_CHAT`. Never use
+`CORRECT_CHAT_ID` as a literal value.
+
+### 6. Run a safe end-to-end mock test
+
+Start the integrated engine with mock market data:
+
+```bash
+python live_trader.py \
+  --telegram-session "$TELEGRAM_SESSION" \
+  --mock-market \
+  --interval 0.5
+```
+
+Now send a fresh complete test trade call to the configured Telegram chat.
+The process should show the parsed call, preflight values, mock entry, staged
+exits, and dry-run orders. This mode cannot place a Fyers order.
+
+Press `Ctrl+C` after the mock test if it is still waiting. The next live run
+must be started before the real Telegram trade call is sent.
+
+### 7. Start the live engine in tmux
+
+If tmux is not installed, install it once:
+
+```bash
+sudo dnf install -y tmux || sudo yum install -y tmux
+```
+
+Start a new session:
+
+```bash
+tmux new -s trader
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+python live_trader.py --telegram-session "$TELEGRAM_SESSION"
+```
+
+Confirm the terminal shows:
+
+```text
+Automatic session mode: LIVE (weekdays, 09:00-15:40 IST).
+Waiting for a WebSocket breakout tick.
+```
+
+The engine is now waiting for a **new** complete trade call. Send the trade
+call only after this message appears. When the trigger crosses, inspect the
+printed `ORDER SUBMIT` line and verify the order in Fyers.
+
+Detach without stopping the engine using `Ctrl+B`, then `D`.
+
+### 8. Monitor or stop the engine
+
+Reattach during the session:
+
+```bash
+tmux attach -t trader
+```
+
+If the engine exits after a completed trade, review the terminal output and
+Fyers order/position screens before starting it again for another signal.
+
+To stop it safely, reattach and press `Ctrl+C`, then verify in Fyers that no
+unexpected position or open order remains:
+
+```bash
+tmux attach -t trader
+```
+
+After verification, leave the EC2 process stopped or stop the EC2 instance
+from AWS Console. Never terminate the instance.
+
 Because Fyers authentication, symbol resolution, market data, and order
 execution are EC2 dependencies, run the integrated process on EC2:
 

@@ -1,7 +1,7 @@
 """Parse trade calls and execute a cross/target/stop-loss strategy.
 
-This module is dry-run by default. Live mode is selected interactively after
-the user answers the live-session prompt.
+This module is dry-run outside the automatic IST weekday market window.
+Live mode is selected automatically from Monday-Friday, 09:00-15:40 IST.
 """
 
 from __future__ import annotations
