@@ -232,7 +232,8 @@ def main() -> None:
         while not trader.closed:
             message = stream.wait_for_update(symbol)
             price = float(message["ltp"])
-            actions = trader.on_price(price)
+            timestamp = message.get("timestamp")
+            actions = trader.on_price(price, timestamp=timestamp)
             print(
                 f"{symbol} | LTP={price} | active SL={trader.active_stoploss:g} "
                 f"| remaining={trader.remaining_quantity}"

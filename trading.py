@@ -13,6 +13,7 @@ import math
 import os
 import re
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -242,6 +243,62 @@ class OrderAction:
     price: float
 
 
+class OneMinuteATR:
+    """Build one-minute bars from LTP ticks and calculate ATR."""
+
+    def __init__(self, period: int = 14) -> None:
+        if period <= 0:
+            raise ValueError("ATR period must be positive")
+        self.period = period
+        self._bucket: int | None = None
+        self._high: float | None = None
+        self._low: float | None = None
+        self._close: float | None = None
+        self._previous_close: float | None = None
+        self._true_ranges: deque[float] = deque(maxlen=period)
+
+    @property
+    def value(self) -> float | None:
+        if not self._true_ranges:
+            return None
+        return sum(self._true_ranges) / len(self._true_ranges)
+
+    def update(self, price: float, timestamp: float | None = None) -> float | None:
+        if price <= 0:
+            raise ValueError("Price must be positive")
+        current_timestamp = time.time() if timestamp is None else float(timestamp)
+        if current_timestamp > 100_000_000_000:
+            current_timestamp /= 1000.0
+        bucket = int(current_timestamp // 60)
+
+        if self._bucket is None:
+            self._bucket = bucket
+            self._high = self._low = self._close = price
+            return self.value
+
+        if bucket != self._bucket:
+            assert self._high is not None and self._low is not None and self._close is not None
+            if self._previous_close is None:
+                true_range = self._high - self._low
+            else:
+                true_range = max(
+                    self._high - self._low,
+                    abs(self._high - self._previous_close),
+                    abs(self._low - self._previous_close),
+                )
+            self._true_ranges.append(true_range)
+            self._previous_close = self._close
+            self._bucket = bucket
+            self._high = self._low = self._close = price
+            return self.value
+
+        assert self._high is not None and self._low is not None
+        self._high = max(self._high, price)
+        self._low = min(self._low, price)
+        self._close = price
+        return self.value
+
+
 class BreakoutTrader:
     """State machine for entry, staged exits, and a trailing stop by target."""
 
@@ -267,6 +324,9 @@ class BreakoutTrader:
         self.active_stoploss = trade_call.stoploss
         self.targets_hit: set[int] = set()
         self.target_quantities = self._allocate_targets()
+        self.atr = OneMinuteATR(
+            period=int(os.getenv("FYERS_ATR_PERIOD", "14"))
+        )
 
     def _allocate_targets(self) -> tuple[int, int, int]:
         first = math.floor(self.quantity * 0.50 / self.lot_size) * self.lot_size
@@ -274,9 +334,10 @@ class BreakoutTrader:
         third = self.quantity - first - second
         return first, second, third
 
-    def on_price(self, price: float) -> list[OrderAction]:
+    def on_price(self, price: float, timestamp: float | None = None) -> list[OrderAction]:
         if price <= 0:
             raise ValueError("Price must be positive")
+        current_atr = self.atr.update(price, timestamp)
         if self.previous_price is None:
             self.previous_price = price
             return []
@@ -291,12 +352,21 @@ class BreakoutTrader:
             crossed_buy_above = previous <= self.trade_call.buy_above < price
             if crossed_trigger_range:
                 reason = "trigger range crossed"
+                raw_buffer = max(1.0, 0.5 * (current_atr or 0.0))
+                max_buffer = price * 0.02
+                slippage_buffer = min(raw_buffer, max_buffer)
+                limit_price = price + slippage_buffer
+                print(
+                    f"ENTRY PRICING: LTP={price:g} ATR_1m="
+                    f"{current_atr if current_atr is not None else 0:g} "
+                    f"buffer={slippage_buffer:g} limit={limit_price:g}"
+                )
                 self.executor.limit_order(
-                    self.symbol, self.quantity, 1, trigger_range[1], reason
+                    self.symbol, self.quantity, 1, limit_price, reason
                 )
                 self.entered = True
                 self.remaining_quantity = self.quantity
-                actions.append(OrderAction(reason, self.quantity, 1, trigger_range[1]))
+                actions.append(OrderAction(reason, self.quantity, 1, limit_price))
             elif crossed_buy_above:
                 reason = "buy-above crossed"
                 self.executor.market_order(self.symbol, self.quantity, 1, reason)

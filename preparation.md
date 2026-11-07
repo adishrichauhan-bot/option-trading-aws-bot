@@ -296,3 +296,218 @@ ls -l ~/.fyers/token.json
 python auth.py
 python -m pip show fyers-apiv3
 ```
+
+## Telegram trade-call listener
+
+`telegram_trade_listener.py` was added as a standalone Telegram user-account
+listener. It parses the instrument, `BUYING RANGE` or `TRIGGER RANGE`, three
+targets, and stop-loss. It also supports calls delivered as multiple Telegram
+message chunks: chunks are appended in message-ID order, decorative characters
+are removed, and JSON is emitted only after the complete call is assembled.
+
+Install the Telegram dependency:
+
+```bash
+python -m pip install telethon
+python -m pip check
+```
+
+Configure Telegram credentials privately in `.env`:
+
+```text
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+TELEGRAM_PHONE=+91XXXXXXXXXX
+TELEGRAM_CHAT=your_actual_chat_id
+TELEGRAM_SESSION=/home/ec2-user/.telegram/trade_listener_ec2
+```
+
+Never use the literal value `CORRECT_CHAT_ID`; replace it with the actual chat
+ID returned by `--list-dialogs`.
+
+List chats for the currently authenticated Telegram account:
+
+```bash
+python telegram_trade_listener.py --list-dialogs
+```
+
+Test recent messages from one chat:
+
+```bash
+python telegram_trade_listener.py \
+  --chat "$TELEGRAM_CHAT" \
+  --once \
+  --limit 20
+```
+
+Run the listener continuously:
+
+```bash
+python telegram_trade_listener.py
+```
+
+The listener prints the logged-in account, target chat, chat ID, received
+chunks, and completed parsed JSON. A Telegram session is account-specific; use
+a new `TELEGRAM_SESSION` path when switching accounts.
+
+## Telegram listener and trading-engine integration
+
+The listener is integrated with `live_trader.py`. The engine waits for the
+first completed Telegram call, converts it into the existing `TradeCall`
+format, resolves the Fyers option symbol, and starts the breakout state
+machine. The listener itself does not place orders.
+
+Because Fyers authentication, symbol resolution, market data, and order
+execution are EC2 dependencies, run the integrated process on EC2:
+
+```bash
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+
+python live_trader.py \
+  --telegram-session "$TELEGRAM_SESSION" \
+  --quantity 100 \
+  --lot-size 10
+```
+
+`live_trader.py` reads `TELEGRAM_CHAT` automatically. Do not pass a literal
+placeholder such as `CORRECT_CHAT_ID`.
+
+The first EC2 Telegram run may request the phone number, login code, and 2FA
+password. Keep the generated `.session` file private.
+
+## EC2 background execution with tmux
+
+Install `tmux` on Amazon Linux:
+
+```bash
+sudo dnf install -y tmux
+```
+
+If `dnf` is unavailable:
+
+```bash
+sudo yum install -y tmux
+```
+
+Start a persistent session:
+
+```bash
+tmux new -s trader
+```
+
+Run the integrated engine inside tmux:
+
+```bash
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+python live_trader.py \
+  --telegram-session "$TELEGRAM_SESSION" \
+  --quantity 100 \
+  --lot-size 10
+```
+
+Detach without stopping the process with `Ctrl+B`, then `D`. Reattach with:
+
+```bash
+tmux attach -t trader
+```
+
+## Offline mock-market validation
+
+When the market is closed, use `--mock-market`. This mode skips Fyers
+authentication and the Fyers WebSocket, uses a mock symbol, forces dry-run
+orders, and runs the same `BreakoutTrader` state machine with deterministic
+prices.
+
+Run Telegram plus mock-market testing on EC2:
+
+```bash
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+
+python live_trader.py \
+  --telegram-session "$TELEGRAM_SESSION" \
+  --mock-market \
+  --quantity 100 \
+  --lot-size 10 \
+  --interval 0.5
+```
+
+Send a new complete trade call after the process starts. The default mock
+sequence performs:
+
+```text
+start below trigger -> cross trigger -> target 1 -> target 2 -> target 3
+```
+
+Expected dry-run exits for quantity 100 are 50, 30, and 20 units.
+
+To test the stop-loss path, use prices matching the trade call's trigger and
+stop-loss values. For a trigger range of `160 - 167` and stop-loss `150`:
+
+```bash
+python live_trader.py \
+  --telegram-session "$TELEGRAM_SESSION" \
+  --mock-market \
+  --mock-prices "160,168,149" \
+  --quantity 100 \
+  --lot-size 10
+```
+
+Expected behavior is entry after the trigger crossing followed by a full
+dry-run exit below stop-loss. Mock mode never asks for live confirmation and
+cannot place a real Fyers order.
+
+## Latest EC2 test sequence
+
+After code changes are pushed from local:
+
+```powershell
+git add telegram_trade_listener.py live_trader.py trading.py market_data_ws.py requirements.txt preparation.md
+git commit -m "Document Telegram EC2 integration and mock testing"
+git push
+```
+
+On EC2:
+
+```bash
+cd ~/option-trading-aws-bot
+git pull --ff-only
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+python telegram_trade_listener.py --list-dialogs
+```
+
+Use the actual chat ID from the dialog list, verify the displayed Telegram
+account, then run the mock-market command above. Only after the Telegram
+listener, parser, entry, target exits, and stop-loss behavior have been
+validated should the normal live command be run.
+
+## Trigger-range slippage-buffer pricing
+
+For a trigger-range entry, the engine no longer uses the upper trigger-range
+value as the limit price. It builds one-minute ATR values from timestamped LTP
+ticks and calculates:
+
+```text
+raw_buffer = max(1.0, 0.5 * current_1m_ATR)
+buffer = min(raw_buffer, 0.02 * current_option_price)
+limit price = current option price + buffer
+```
+
+The current option price is the LTP at the trigger crossing. Until a completed
+one-minute bar is available, ATR is unavailable and the minimum buffer of `1.0`
+is used, still subject to the 2% cap. `BUY ABOVE` entries remain market orders.
+
+The engine prints the calculation at entry:
+
+```text
+ENTRY PRICING: LTP=168 ATR_1m=... buffer=... limit=...
+```
+
+The ATR period can be configured with `FYERS_ATR_PERIOD`; the default is 14
+completed one-minute bars.
