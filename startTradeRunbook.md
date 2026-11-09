@@ -32,6 +32,10 @@ python live_trader.py --telegram-session "$TELEGRAM_SESSION"
 Wait until  terminal shows:
 Waiting for a WebSocket breakout tick.
 
+After a trade reaches target 3, stop-loss, or an ordinary trade error, the same
+process returns to Telegram listening for the next complete trade call. Do not
+restart it after each trade.
+
 Step-7.
 Detach from `tmux` without stopping  engine:
-Ctrl+B, n D
+Ctrl+B, then D

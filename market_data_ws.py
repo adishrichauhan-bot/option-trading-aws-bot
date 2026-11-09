@@ -94,6 +94,12 @@ class FyersMarketDataSocket:
         with self._lock:
             return self._prices.get(symbol)
 
+    def close(self) -> None:
+        """Stop this stream before the next trade creates a new one."""
+        close_connection = getattr(self._socket, "close_connection", None)
+        if close_connection is not None:
+            close_connection()
+
     def wait_for(self, symbol: str, timeout: float = 10.0) -> dict[str, Any]:
         self.subscribe([symbol])
         with self._lock:
@@ -144,6 +150,9 @@ class MockMarketDataSocket:
 
     def subscribe(self, symbols: Iterable[str]) -> None:
         """Match the live socket interface; no network connection is made."""
+
+    def close(self) -> None:
+        """Match the live socket interface; no network connection is open."""
 
     def wait_for_update(self, symbol: str, timeout: float = 10.0) -> dict[str, Any]:
         del timeout

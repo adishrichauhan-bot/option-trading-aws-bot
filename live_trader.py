@@ -133,62 +133,8 @@ def _mock_price_sequence(signal: object, raw_prices: str | None) -> list[float]:
     return [start, crossing_price, targets[0] + 1, targets[1] + 1, targets[2] + 1]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the simple Fyers trade assistant")
-    parser.add_argument("--signal-file", type=Path, help="Optional file containing a trade call")
-    parser.add_argument(
-        "--telegram-chat",
-        default=os.getenv("TELEGRAM_CHAT"),
-        help="Read the first completed trade call from this Telegram chat",
-    )
-    parser.add_argument(
-        "--telegram-session",
-        default=os.getenv("TELEGRAM_SESSION", "~/.telegram/trade_listener"),
-        help="Telethon session path for --telegram-chat",
-    )
-    parser.add_argument(
-        "--mock-market",
-        action="store_true",
-        help="Use deterministic dry-run prices instead of Fyers market data",
-    )
-    parser.add_argument(
-        "--mock-prices",
-        help="Optional comma-separated mock prices, for example 160,168,150",
-    )
-    parser.add_argument(
-        "--quantity",
-        type=int,
-        help="Optional quantity override; otherwise FYERS_QUANTITY (default: 100)",
-    )
-    parser.add_argument(
-        "--lot-size",
-        type=int,
-        help="Optional lot-size override; otherwise FYERS_LOT_SIZE (default: 10)",
-    )
-    parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
-    args = parser.parse_args()
-
-    telegram_thread: Thread | None = None
-    telegram_stop = Event()
-    if args.telegram_chat:
-        calls: Queue[TradeCallMessage | BaseException] = Queue()
-        telegram_thread = Thread(
-            target=_telegram_worker,
-            args=(args.telegram_chat, args.telegram_session, calls, telegram_stop),
-            name="telegram-trade-listener",
-            daemon=True,
-        )
-        print(f"Waiting for a complete trade call from Telegram chat {args.telegram_chat}...")
-        telegram_thread.start()
-        item = calls.get()
-        telegram_stop.set()
-        if isinstance(item, BaseException):
-            raise item
-        signal_text = telegram_call_to_signal(item)
-        print("Telegram trade call accepted as the trading-engine input.")
-    else:
-        signal_text = read_signal(args.signal_file)
-
+def run_trade(args: argparse.Namespace, signal_text: str) -> None:
+    """Run one trade and return so the caller can wait for another signal."""
     signal = parse_trade_call(signal_text)
     quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY", default=100)
     lot_size = read_quantity(args.lot_size, "Lot size", "FYERS_LOT_SIZE", default=10)
@@ -264,6 +210,90 @@ def main() -> None:
         print(f"Mock market test finished: {exc}")
     except KeyboardInterrupt:
         print("\nMonitoring stopped. Any broker position remains open; verify it in Fyers.")
+        raise
+    finally:
+        close_stream = getattr(stream, "close", None)
+        if close_stream is not None:
+            try:
+                close_stream()
+            except Exception as exc:
+                print(f"Market-data stream cleanup failed: {exc}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the simple Fyers trade assistant")
+    parser.add_argument("--signal-file", type=Path, help="Optional file containing a trade call")
+    parser.add_argument(
+        "--telegram-chat",
+        default=os.getenv("TELEGRAM_CHAT"),
+        help="Continuously read completed trade calls from this Telegram chat",
+    )
+    parser.add_argument(
+        "--telegram-session",
+        default=os.getenv("TELEGRAM_SESSION", "~/.telegram/trade_listener"),
+        help="Telethon session path for --telegram-chat",
+    )
+    parser.add_argument(
+        "--mock-market",
+        action="store_true",
+        help="Use deterministic dry-run prices instead of Fyers market data",
+    )
+    parser.add_argument(
+        "--mock-prices",
+        help="Optional comma-separated mock prices, for example 160,168,150",
+    )
+    parser.add_argument(
+        "--quantity",
+        type=int,
+        help="Optional quantity override; otherwise FYERS_QUANTITY (default: 100)",
+    )
+    parser.add_argument(
+        "--lot-size",
+        type=int,
+        help="Optional lot-size override; otherwise FYERS_LOT_SIZE (default: 10)",
+    )
+    parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
+    args = parser.parse_args()
+
+    telegram_thread: Thread | None = None
+    telegram_stop = Event()
+    calls: Queue[TradeCallMessage | BaseException] | None = None
+    if args.telegram_chat:
+        calls = Queue()
+        telegram_thread = Thread(
+            target=_telegram_worker,
+            args=(args.telegram_chat, args.telegram_session, calls, telegram_stop),
+            name="telegram-trade-listener",
+            daemon=True,
+        )
+        print(f"Listening continuously for trade calls from Telegram chat {args.telegram_chat}...")
+        telegram_thread.start()
+
+    try:
+        while True:
+            if calls is not None:
+                item = calls.get()
+                if isinstance(item, BaseException):
+                    raise item
+                signal_text = telegram_call_to_signal(item)
+                print("Telegram trade call accepted as the trading-engine input.")
+            else:
+                signal_text = read_signal(args.signal_file)
+
+            try:
+                run_trade(args, signal_text)
+                print("Trade completed. Returning to Telegram listener for the next trade call.")
+                if calls is None:
+                    return
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"Trade stopped before completion: {exc}")
+                if calls is None:
+                    raise
+                print("Returning to Telegram listener for the next trade call.")
+    except KeyboardInterrupt:
+        print("\nTrading engine stopped.")
     finally:
         telegram_stop.set()
         if telegram_thread is not None:
