@@ -10,8 +10,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
 from market_data_ws import FyersMarketDataSocket
+from trader_control import TraderProcessManager
 
 
 load_dotenv()
@@ -181,6 +184,83 @@ class FyersMarketData:
 
 
 app = FastAPI(title="Fyers Market Data MVP", version="0.1.0")
+trader_manager = TraderProcessManager()
+
+
+class TraderSettingsRequest(BaseModel):
+    quantity: int = Field(gt=0)
+    lot_size: int = Field(gt=0)
+
+
+class TraderStartRequest(TraderSettingsRequest):
+    telegram_chat: str | None = None
+    telegram_session: str | None = None
+    mock_market: bool = False
+
+
+TRADER_UI = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Engine Control</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;background:#f5f7fb;color:#172033}
+main{background:white;border:1px solid #dce2ec;border-radius:12px;padding:1.25rem;box-shadow:0 4px 18px #17203312}
+label{display:block;margin:.75rem 0 .25rem}input{padding:.55rem;width:100%;box-sizing:border-box;border:1px solid #b8c2d1;border-radius:6px}
+button{padding:.6rem 1rem;margin:1rem .5rem 1rem 0;border:0;border-radius:6px;background:#155eef;color:white;cursor:pointer}
+button.stop{background:#c62828}button.secondary{background:#596579}pre{background:#101827;color:#dce7f7;padding:1rem;border-radius:8px;min-height:9rem;white-space:pre-wrap}
+.note{color:#596579;font-size:.9rem}.state{font-weight:700}
+</style></head><body><main><h1>Trading Engine Control</h1>
+<p class="note">This page controls the local <code>live_trader.py</code> process. Quantity and lot-size changes apply when the engine is started next; they do not resize an active broker position. Stop only after checking Fyers; it does not close broker positions.</p>
+<label>Trade quantity</label><input id="quantity" type="number" min="1" value="100">
+<label>Lot size</label><input id="lot_size" type="number" min="1" value="10">
+<label>Telegram chat (optional; .env is used when blank)</label><input id="telegram_chat" placeholder="-100..."><label>Telegram session (optional)</label><input id="telegram_session" placeholder="~/.telegram/trade_listener">
+<label><input id="mock_market" type="checkbox" style="width:auto"> Mock market / dry run</label>
+<button onclick="startEngine()">Start engine</button><button class="stop" onclick="stopEngine()">Stop engine</button><button class="secondary" onclick="refresh()">Refresh</button>
+<p>Status: <span class="state" id="state">loading...</span></p><pre id="output"></pre>
+<script>
+async function call(path, options){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const d=await r.json();if(!r.ok)throw Error(d.detail||'request failed');return d}
+function show(d){document.getElementById('state').textContent=d.running?'RUNNING (PID '+d.pid+')':'STOPPED';document.getElementById('output').textContent=(d.output||[]).join('\n')}
+async function refresh(){try{show(await call('/trader/status'))}catch(e){document.getElementById('state').textContent=e}}
+async function startEngine(){try{show(await call('/trader/start',{method:'POST',body:JSON.stringify({quantity:+quantity.value,lot_size:+lot_size.value,telegram_chat:telegram_chat.value||null,telegram_session:telegram_session.value||null,mock_market:mock_market.checked})}))}catch(e){alert(e)}}
+async function stopEngine(){try{show(await call('/trader/stop',{method:'POST'}))}catch(e){alert(e)}}
+refresh();setInterval(refresh,2000)
+</script></main></body></html>"""
+
+
+@app.get("/trader", response_class=HTMLResponse)
+def trader_ui() -> str:
+    return TRADER_UI
+
+
+@app.get("/trader/status")
+def trader_status() -> dict[str, Any]:
+    return trader_manager.status()
+
+
+@app.post("/trader/settings")
+def trader_settings(request: TraderSettingsRequest) -> dict[str, Any]:
+    try:
+        return trader_manager.update_settings(request.quantity, request.lot_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/trader/start")
+def trader_start(request: TraderStartRequest) -> dict[str, Any]:
+    try:
+        return trader_manager.start(
+            quantity=request.quantity,
+            lot_size=request.lot_size,
+            telegram_chat=request.telegram_chat,
+            telegram_session=request.telegram_session,
+            mock_market=request.mock_market,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409 if isinstance(exc, RuntimeError) else 400, detail=str(exc)) from exc
+
+
+@app.post("/trader/stop")
+def trader_stop() -> dict[str, Any]:
+    return trader_manager.stop()
 
 
 @app.get("/health")

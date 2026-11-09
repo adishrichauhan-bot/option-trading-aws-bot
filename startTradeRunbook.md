@@ -10,7 +10,7 @@ python -m pip check
 
 Step-3. 
 Check .env
-grep -E '^(TELEGRAM_CHAT|TELEGRAM_SESSION|FYERS_QUANTITY|FYERS_LOT_SIZE)=' .env
+grep -E '^(TELEGRAM_CHAT|TELEGRAM_SESSION|FYERS_QUANTITY|FYERS_LOT_SIZE|TRADE_REGISTRY_PATH)=' .env
 
 Step-4. 
 Check Fyers auntication
@@ -22,6 +22,20 @@ Verify Telegram account once when needed
 python telegram_trade_listener.py --list-dialogs
 
 Step-6. 
+Start the local control UI in a separate tmux window or SSH session:
+uvicorn app:app --host 127.0.0.1 --port 8000
+
+Open `http://127.0.0.1:8000/trader` through an SSH tunnel. The page can start
+or stop `live_trader.py`, set quantity and lot size, select mock-market mode,
+and display recent engine output. Quantity and lot-size changes apply to the
+next engine start; they never resize an active broker position.
+
+For local access from Windows, create the tunnel in a separate PowerShell
+window:
+ssh -i "C:/Users/prabh/Downloads/aws-asus-option-trad-pem.pem" -L 8000:127.0.0.1:8000 ec2-user@CURRENT_PUBLIC_IP
+Then browse to `http://127.0.0.1:8000/trader`.
+
+Step-7.
 Start  live engine
 tmux new -s trader
 or
@@ -29,13 +43,21 @@ tmux attach -t trader
 source .venv/bin/activate
 python live_trader.py --telegram-session "$TELEGRAM_SESSION"
 
-Wait until  terminal shows:
-Waiting for a WebSocket breakout tick.
+Wait until the terminal shows that it is listening for Telegram trade calls.
+After a complete call is received, it prints a unique ID such as
+`FB-20261109-0001`, resolves the Fyers symbol, and starts the market-data
+WebSocket for that trade.
 
-After a trade reaches target 3, stop-loss, or an ordinary trade error, the same
-process returns to Telegram listening for the next complete trade call. Do not
-restart it after each trade.
+After target 3, stop-loss, cancellation, manual exit, or an ordinary trade
+error, the same process returns to Telegram listening for the next complete
+trade call. Do not restart it after each trade.
 
-Step-7.
+While one trade is active, the listener also accepts control messages such as
+`MODIFY ENTRY - BUYING RANGE - 220 - 230`, `MODIFY SL - 290`, `MODIFY TARGET - 305, 320, 380`, `CANCEL`, `EXIT`, and `RE ENTRY - 135 - 145`. An explicit ID such as `FB-20261109-0001` can be included when needed. A pending Fyers stop-loss order is monitored, and a market exit is submitted if price moves more than 2% below that stop-loss.
+
+The lifecycle journal is stored at `~/.fyers/trade_lifecycle.sqlite3` by
+default. Set `TRADE_REGISTRY_PATH` to use another private path.
+
+Step-8.
 Detach from `tmux` without stopping  engine:
 Ctrl+B, then D

@@ -7,6 +7,11 @@ This file records the development and EC2 setup completed so far. Never commit r
 - [`auth.py`](./auth.py): Fyers authorization-code flow and token cache.
 - [`app.py`](./app.py): FastAPI service for NIFTY, SENSEX, and ATM options.
 - [`trading.py`](./trading.py): trade-call parser and trading state machine.
+- [`live_trader.py`](./live_trader.py): persistent Telegram-to-Fyers trading entry point.
+- [`telegram_trade_listener.py`](./telegram_trade_listener.py): Telegram message assembler and control-command parser.
+- [`trade_lifecycle.py`](./trade_lifecycle.py): unique trade IDs and lifecycle journal.
+- [`trader_control.py`](./trader_control.py): local process supervisor used by the UI.
+- [`tests/`](./tests/): automated WebSocket, parser, lifecycle, and trade-safety tests.
 - [`requirements.txt`](./requirements.txt): Python dependencies.
 - [`RUNNING.md`](./RUNNING.md): run instructions.
 - [`.env.example`](./.env.example): environment-variable template.
@@ -138,6 +143,41 @@ curl -i "http://127.0.0.1:8000/market-data?indices=NIFTY&strike_count=3"
 
 The API binds to localhost and is not directly exposed publicly. If Uvicorn was started in the background, inspect it with `ps -ef | grep uvicorn`.
 
+## Simple trading control UI
+
+The same FastAPI service exposes a minimal localhost-only control page at
+`/trader`. It supervises the actual `live_trader.py` process; it does not place
+orders independently.
+
+Start the API on EC2:
+
+```bash
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+Create an SSH tunnel from Windows PowerShell:
+
+```powershell
+ssh -i "C:/path/to/ec2-key.pem" -L 8000:127.0.0.1:8000 ec2-user@CURRENT_PUBLIC_IP
+```
+
+Open `http://127.0.0.1:8000/trader`. The page supports:
+
+- starting and stopping the persistent Telegram trading engine;
+- setting trade quantity and lot size, with validation that quantity is a
+  positive multiple of lot size;
+- optionally overriding Telegram chat/session values;
+- starting mock-market dry-run mode; and
+- viewing recent `live_trader.py` output and process status.
+
+Changing quantity or lot size while the engine is running changes the saved UI
+settings only; it does not resize an active broker position. Stop the engine
+only after checking Fyers positions and open orders, then start it again to
+apply new sizing. Keep the API bound to `127.0.0.1`; do not expose this
+control page directly to the public internet.
+
 ## Trade-call MVP
 
 Supported format: `NIFTY 23450 CE`, `BUY ABOVE - 140`, `TARGET - 150, 163, 180`, `SL - 127`.
@@ -156,6 +196,30 @@ The active stop-loss also advances during the trade: it starts at the original
 `SL`, changes to `target_1` after target 1 is crossed, and changes to `target_2`
 after target 2 is crossed. A fall below the current active stop-loss exits the
 remaining quantity.
+
+The integrated live engine also supports these controls while one trade is
+active:
+
+```text
+MODIFY ENTRY - BUYING RANGE - 220 - 230
+MODIFY ENTRY - BUY ABOVE - 320
+MODIFY SL - 290
+MODIFY TARGET - 305, 320, 380
+CANCEL
+EXIT
+RE ENTRY - 135 - 145
+```
+
+Each Telegram call receives a persistent ID such as `FB-20261109-0001`.
+Lifecycle records are stored in `~/.fyers/trade_lifecycle.sqlite3` by default;
+set `TRADE_REGISTRY_PATH` to use another private path. The engine runs one
+active trade at a time. New complete calls received during an active trade are
+queued and processed after it closes.
+
+If Fyers acknowledges an exit order without reporting it as filled, the engine
+keeps monitoring the remaining position. If price moves more than 2% below the
+active stop-loss, it submits an emergency market exit. Fyers order and
+position state remains authoritative and must be verified.
 
 Instrument parsing accepts generic names such as `BANKNIFTY 55000 CE`,
 `FINNIFTY 24000 PE`, and `MCX:CRUDEOIL 7000 CE`. For an equity option or an
@@ -379,12 +443,25 @@ The parser and engine were syntax-checked after the integration changes. The
 following functional and technical risks remain and should be understood
 before live use:
 
+Current behavior correction: `live_trader.py` now remains alive after target 3,
+stop-loss, cancellation, manual exit, or an ordinary trade error and returns
+to Telegram listening. New calls are queued while one trade is active. Each
+Telegram call receives a persistent `FB-YYYYMMDD-NNNN` ID. Control commands
+include `MODIFY ENTRY`, `MODIFY SL`, `MODIFY TARGET`, `CANCEL`, `EXIT`, and
+`RE ENTRY`. If an exit order is acknowledged but remains pending, price moving
+more than 2% below the active stop-loss triggers an emergency market exit.
+
+The remaining limitations are listed below; the older one-process statement in
+the historical notes is superseded by this current behavior:
+
 1. **High — limit-order fill is not confirmed.** For a trigger-range entry,
    the engine marks the trade as entered after Fyers accepts the limit-order
    request. It does not poll the order status or confirm a fill. If the order
    remains pending or is partially filled, target and stop-loss actions may not
    match the actual broker position.
-2. **High — one trade per process.** After target 3 or stop-loss closes the
+2. **Historical note (superseded) — one trade per process.** The current
+   persistent listener now returns to Telegram after target 3 or stop-loss.
+   The original behavior was:
    state machine, `live_trader.py` exits. Restart it before handling another
    trade call.
 3. **High — only new Telegram messages are consumed after startup.** The
@@ -557,8 +634,10 @@ Reattach during the session:
 tmux attach -t trader
 ```
 
-If the engine exits after a completed trade, review the terminal output and
-Fyers order/position screens before starting it again for another signal.
+After a completed trade, review the terminal output and Fyers order/position
+screens. The same process should continue listening for the next signal; only
+restart it after a deliberate shutdown, crash, token failure, or reconciliation
+check.
 
 To stop it safely, reattach and press `Ctrl+C`, then verify in Fyers that no
 unexpected position or open order remains:
