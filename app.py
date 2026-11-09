@@ -218,7 +218,7 @@ button.stop{background:#c62828}button.secondary{background:#596579}pre{backgroun
 <p>Status: <span class="state" id="state">loading...</span></p><pre id="output"></pre>
 <script>
 async function call(path, options){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const d=await r.json();if(!r.ok)throw Error(d.detail||'request failed');return d}
-function show(d){document.getElementById('state').textContent=d.running?'RUNNING (PID '+d.pid+')':'STOPPED';document.getElementById('output').textContent=(d.output||[]).join('\n')}
+function show(d){document.getElementById('state').textContent=d.running?'RUNNING (PID '+d.pid+')':'STOPPED';document.getElementById('output').textContent=(d.output||[]).join(String.fromCharCode(10))}
 async function refresh(){try{show(await call('/trader/status'))}catch(e){document.getElementById('state').textContent=e}}
 async function startEngine(){try{show(await call('/trader/start',{method:'POST',body:JSON.stringify({quantity:+quantity.value,lot_size:+lot_size.value,telegram_chat:telegram_chat.value||null,telegram_session:telegram_session.value||null,mock_market:mock_market.checked})}))}catch(e){alert(e)}}
 async function stopEngine(){try{show(await call('/trader/stop',{method:'POST'}))}catch(e){alert(e)}}
