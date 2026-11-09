@@ -19,6 +19,7 @@ from threading import Event, Thread
 from market_data_ws import FyersMarketDataSocket, MockMarketDataSocket
 from trading import (
     BreakoutTrader,
+    BrokerStateError,
     FyersOrderExecutor,
     authenticated_client,
     authenticated_credentials,
@@ -130,8 +131,9 @@ def _mock_price_sequence(signal: object, raw_prices: str | None) -> list[float]:
     targets = getattr(signal, "targets")
     start = trigger_range[0] if trigger_range else max(0.01, entry - 1)
     crossing_price = trigger_range[1] + 1 if trigger_range else entry + 1
-    # The default sequence enters and crosses all three targets.
-    return [start, crossing_price, targets[0] + 1, targets[1] + 1, targets[2] + 1]
+    # Demonstrate the runner: T3, another high, then a trailing-stop retracement.
+    high = targets[2] * 1.10 + 1
+    return [start, crossing_price, targets[0] + 1, targets[1] + 1, targets[2] + 1, high, targets[2] - 0.1]
 
 
 def _command_applies(command: TradeCommand, trade_id: str, source_message_ids: tuple[int, ...]) -> bool:
@@ -171,8 +173,9 @@ def run_trade(
     pending_signals: list[str] | None = None,
     trade_id: str = "manual",
     source_message_ids: tuple[int, ...] = (),
-) -> None:
-    """Run one trade and return so the caller can wait for another signal."""
+    registry: TradeRegistry | None = None,
+) -> bool:
+    """Return whether the trade is closed; an exhausted mock feed may leave a runner."""
     signal = parse_trade_call(signal_text)
     quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY", default=100)
     lot_size = read_quantity(args.lot_size, "Lot size", "FYERS_LOT_SIZE", default=10)
@@ -225,6 +228,30 @@ def run_trade(
         lot_size,
         FyersOrderExecutor(client, live=live),
     )
+    journal_snapshot = None
+
+    def journal() -> None:
+        nonlocal journal_snapshot
+        snapshot = {
+            "symbol": symbol,
+            "remaining_quantity": trader.remaining_quantity,
+            "confirmed_entry_quantity": trader.confirmed_entry_quantity,
+            "active_stoploss": trader.active_stoploss,
+            "trailing": trader.trailing,
+            "closed": trader.closed,
+            "orders": [
+                {"id": order.response.get("id"), "side": order.side, "quantity": order.quantity,
+                 "filled_quantity": order.applied_fill, "reason": order.reason,
+                 "cancel_requested": order.cancel_requested, "status": order.status}
+                for order in trader.order_history
+            ],
+        }
+        if registry is not None and snapshot != journal_snapshot:
+            try:
+                registry.update(trade_id, "CLOSED" if trader.closed else "ACTIVE", **snapshot)
+            except Exception as exc:
+                raise BrokerStateError(f"Cannot persist broker lifecycle state: {exc}") from exc
+            journal_snapshot = snapshot
     print(
         "Waiting for mock breakout ticks."
         if args.mock_market
@@ -233,6 +260,10 @@ def run_trade(
 
     try:
         while not trader.closed:
+            trader.poll_orders()
+            journal()
+            if trader.closed:
+                break
             if event_queue is not None:
                 while True:
                     try:
@@ -262,10 +293,13 @@ def run_trade(
                     elif event.action == "EXIT":
                         trader.manual_exit("Telegram manual exit")
                     elif event.action == "REENTRY" and pending_signals is not None:
-                        if trader.entered and not trader.closed:
-                            trader.manual_exit("Telegram re-entry requested")
+                        trader.manual_exit("Telegram re-entry requested")
                         pending_signals.append(_signal_with_command(signal, event))
-                        trader.closed = True
+                    if trader.closed:
+                        break
+                journal()
+                if trader.closed:
+                    break
             try:
                 message = stream.wait_for_update(
                     symbol, timeout=min(1.0, max(0.05, args.interval or 1.0))
@@ -275,6 +309,7 @@ def run_trade(
             price = float(message["ltp"])
             timestamp = message.get("timestamp")
             actions = trader.on_price(price, timestamp=timestamp)
+            journal()
             print(
                 f"{symbol} | LTP={price} | active SL={trader.active_stoploss:g} "
                 f"| remaining={trader.remaining_quantity}"
@@ -288,13 +323,21 @@ def run_trade(
     except KeyboardInterrupt:
         print("\nMonitoring stopped. Any broker position remains open; verify it in Fyers.")
         raise
+    except Exception as exc:
+        if live and (trader.entered or trader.entry_order is not None or trader.exit_order is not None):
+            raise BrokerStateError(f"Monitoring failed with possible broker exposure: {exc}") from exc
+        raise
     finally:
-        close_stream = getattr(stream, "close", None)
-        if close_stream is not None:
-            try:
-                close_stream()
-            except Exception as exc:
-                print(f"Market-data stream cleanup failed: {exc}")
+        try:
+            journal()
+        finally:
+            close_stream = getattr(stream, "close", None)
+            if close_stream is not None:
+                try:
+                    close_stream()
+                except Exception as exc:
+                    print(f"Market-data stream cleanup failed: {exc}")
+    return trader.closed
 
 
 def main() -> None:
@@ -379,21 +422,30 @@ def main() -> None:
             try:
                 if trade_id not in {"manual", "reentry"}:
                     registry.update(trade_id, "ACTIVE")
-                run_trade(
+                completed = run_trade(
                     args,
                     signal_text,
                     event_queue=calls,
                     pending_signals=pending_signals,
                     trade_id=trade_id,
                     source_message_ids=source_message_ids,
+                    registry=registry if trade_id not in {"manual", "reentry"} else None,
                 )
                 if trade_id not in {"manual", "reentry"}:
-                    registry.update(trade_id, "CLOSED")
-                print("Trade completed. Returning to Telegram listener for the next trade call.")
+                    registry.update(trade_id, "MOCK_INCOMPLETE" if completed is False else "CLOSED")
+                if completed is False:
+                    print("Mock feed exhausted with an open simulated position; not a completed trade.")
+                else:
+                    print("Trade completed. Returning to Telegram listener for the next trade call.")
                 if calls is None:
                     return
             except KeyboardInterrupt:
                 raise
+            except BrokerStateError as exc:
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "RECONCILIATION_REQUIRED", error=str(exc))
+                print(f"Broker state requires reconciliation; no next trade will start: {exc}")
+                return
             except Exception as exc:
                 if trade_id not in {"manual", "reentry"}:
                     registry.update(trade_id, "ERROR", error=str(exc))

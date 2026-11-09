@@ -163,11 +163,42 @@ class OrderExecutor(Protocol):
         ...
 
 
+class BrokerStateError(RuntimeError):
+    """Stop accepting new trades when broker exposure cannot safely be established."""
+
+
+@dataclass(frozen=True)
+class OrderState:
+    order_id: str
+    status: str
+    filled_quantity: int
+
+    @property
+    def terminal(self) -> bool:
+        return self.status in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
+
+
+@dataclass
+class TrackedOrder:
+    response: Any
+    quantity: int
+    side: int
+    reason: str
+    applied_fill: int = 0
+    cancel_requested: bool = False
+    status: str = "SUBMITTED"
+
+
 class FyersOrderExecutor:
     def __init__(self, client: Any, *, live: bool = False) -> None:
         self.client = client
         self.live = live
         self.product_type = os.getenv("FYERS_PRODUCT_TYPE", "INTRADAY")
+        self.poll_interval = float(os.getenv("FYERS_ORDER_POLL_SECONDS", "1"))
+        if not math.isfinite(self.poll_interval) or self.poll_interval < 0:
+            raise ValueError("FYERS_ORDER_POLL_SECONDS must be nonnegative and finite")
+        self._states: dict[str, tuple[float, OrderState]] = {}
+        self._submitted_quantities: dict[str, int] = {}
 
     def _place_order(self, order: dict[str, Any], reason: str) -> Any:
         order_type = "LIMIT" if order["type"] == 1 else "MARKET"
@@ -187,10 +218,60 @@ class FyersOrderExecutor:
             f"quantity={order['qty']} symbol={order['symbol']}"
         )
         print(f"LIVE ORDER PAYLOAD: {json.dumps(order, sort_keys=True)}")
-        response = self.client.place_order(order)
+        try:
+            response = self.client.place_order(order)
+        except Exception as exc:
+            # A network failure may occur AFTER the broker accepts the request.
+            raise BrokerStateError(f"Order submission outcome unknown; reconcile broker orders: {exc}") from exc
         if isinstance(response, dict) and response.get("s") == "error":
-            raise RuntimeError(f"Fyers rejected order: {response}")
+            raise BrokerStateError(f"Fyers rejected order: {response}")
+        if not isinstance(response, dict) or not response.get("id"):
+            raise BrokerStateError(f"Order submission has no trackable ID: {response}")
+        self._submitted_quantities[str(response["id"])] = order["qty"]
         return response
+
+    def order_state(self, response: Any, quantity: int, *, force: bool = False) -> OrderState:
+        """Read fresh cumulative fills by broker order ID, never from an acknowledgement."""
+        if not self.live:
+            return OrderState("dry-run", "FILLED", quantity)
+        order_id = str(response["id"])
+        cached = self._states.get(order_id)
+        if not force and cached and time.monotonic() - cached[0] < self.poll_interval:
+            return cached[1]
+        try:
+            result = self.client.orderbook(data={"id": order_id})
+            if not isinstance(result, dict) or result.get("s") == "error":
+                raise ValueError(f"orderbook failed: {result}")
+            row = next(item for item in result.get("orderBook", []) if str(item.get("id")) == order_id)
+            status = str(row["status"]).upper()
+            status = {"1": "CANCELLED", "2": "FILLED", "4": "TRANSIT", "5": "REJECTED",
+                      "6": "PENDING", "7": "EXPIRED", "TRADED": "FILLED",
+                      "COMPLETE": "FILLED", "EXECUTED": "FILLED", "CANCELED": "CANCELLED"}.get(status, status)
+            if status not in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED", "PENDING", "TRANSIT", "PARTIALLY_FILLED"}:
+                raise ValueError(f"unknown order status: {status}")
+            filled = int(row["filledQty"])
+            if not 0 <= filled <= quantity or (status == "FILLED" and filled != quantity):
+                raise ValueError(f"inconsistent filledQty: {row}")
+            state = OrderState(order_id, status, filled)
+        except Exception as exc:
+            raise BrokerStateError(f"Cannot reconcile order {order_id}: {exc}") from exc
+        self._states[order_id] = (time.monotonic(), state)
+        return state
+
+    def cancel_order(self, response: Any) -> None:
+        if self.live:
+            # A cancellation acknowledgement is NOT confirmation of cancellation.
+            try:
+                result = self.client.cancel_order(data={"id": str(response["id"])})
+            except Exception as exc:
+                raise BrokerStateError(f"Cancellation outcome unknown for {response['id']}: {exc}") from exc
+            self._states.pop(str(response["id"]), None)
+            if not isinstance(result, dict) or result.get("s") != "ok":
+                # A completed fill can legitimately win the cancellation race.
+                state = self.order_state(response, self._submitted_quantities[str(response["id"])], force=True)
+                if not state.terminal:
+                    raise BrokerStateError(f"Cancellation rejected for pending order {response['id']}: {result}")
+            print(f"ORDER CANCEL requested: {response['id']}: {result}")
 
     def market_order(self, symbol: str, quantity: int, side: int, reason: str) -> Any:
         order = {
@@ -234,20 +315,15 @@ class FyersOrderExecutor:
         return self._place_order(order, reason)
 
     def is_order_filled(self, response: Any) -> bool:
-        """Return a conservative fill decision for an exit response.
-
-        Fyers may acknowledge an order before it is filled. Missing status is
-        therefore treated as pending in live mode so the emergency guard can
-        protect the remaining position.
-        """
+        """Compatibility helper using refreshed broker state, not submission status."""
         if not self.live:
             return True
-        if not isinstance(response, dict):
+        if not isinstance(response, dict) or not response.get("id"):
             return False
-        status = response.get("status", response.get("orderStatus"))
-        if isinstance(status, str):
-            return status.upper() in {"FILLED", "TRADED", "COMPLETE", "EXECUTED"}
-        return status == 2
+        quantity = self._submitted_quantities.get(str(response["id"]))
+        if quantity is None:
+            raise BrokerStateError(f"Unknown submitted order ID: {response['id']}")
+        return self.order_state(response, quantity).status == "FILLED"
 
 
 # India has a fixed UTC+05:30 offset and does not observe daylight saving time.
@@ -361,12 +437,201 @@ class BreakoutTrader:
         self.remaining_quantity = 0
         self.active_stoploss = trade_call.stoploss
         self.targets_hit: set[int] = set()
+        self.target_exits_sent: set[int] = set()
         self.target_quantities = self._allocate_targets()
         self.atr = OneMinuteATR(
             period=int(os.getenv("FYERS_ATR_PERIOD", "14"))
         )
         self.pending_exit: tuple[Any, int, float] | None = None
         self.emergency_exit_sent = False
+        self.entry_order: TrackedOrder | None = None
+        self.exit_order: TrackedOrder | None = None
+        self.order_history: list[TrackedOrder] = []
+        self.confirmed_entry_quantity = 0
+        self.exit_requested: str | None = None
+        self.trailing = False
+        self.high_watermark: float | None = None
+        self.trailing_percent = float(os.getenv("FYERS_TRAILING_PERCENT", "3")) / 100
+        self.trailing_atr_multiple = float(os.getenv("FYERS_TRAILING_ATR_MULTIPLE", "2"))
+        self.price_tick = float(os.getenv("FYERS_PRICE_TICK", "0.05"))
+        if not 0 < self.trailing_percent < 1 or not math.isfinite(self.trailing_atr_multiple) or self.trailing_atr_multiple <= 0:
+            raise ValueError("Trailing percent must be between 0 and 100; ATR multiple must be positive")
+        if not math.isfinite(self.price_tick) or self.price_tick <= 0:
+            raise ValueError("FYERS_PRICE_TICK must be positive and finite")
+        if getattr(self.executor, "live", False) and not self.confirms_orders:
+            raise ValueError("Live execution requires broker order-state confirmation")
+
+    @property
+    def confirms_orders(self) -> bool:
+        return callable(getattr(self.executor, "order_state", None))
+
+    def _update_trailing_stop(self, price: float) -> None:
+        if not self.trailing:
+            return
+        # Ratchet only at new highs: volatility changes alone never tighten the stop.
+        if self.high_watermark is not None and price <= self.high_watermark:
+            return
+        self.high_watermark = price
+        gap = max(price * self.trailing_percent, (self.atr.value or 0) * self.trailing_atr_multiple)
+        self.active_stoploss = max(self.active_stoploss, self.trade_call.targets[2], price - gap)
+
+    def _apply_order_state(self, order: TrackedOrder) -> OrderState:
+        state = self.executor.order_state(order.response, order.quantity)
+        order.status = state.status
+        delta = state.filled_quantity - order.applied_fill
+        if delta < 0:
+            raise BrokerStateError(f"Fill quantity regressed for {state.order_id}")
+        self.remaining_quantity += delta * order.side
+        if self.remaining_quantity < 0:
+            raise BrokerStateError("Confirmed sells exceed confirmed buys")
+        order.applied_fill = state.filled_quantity
+        if order.side == 1:
+            self.confirmed_entry_quantity += delta
+            self.entered = self.confirmed_entry_quantity > 0
+        return state
+
+    def _cancel_tracked(self, order: TrackedOrder) -> None:
+        if not order.cancel_requested:
+            self.executor.cancel_order(order.response)
+            order.cancel_requested = True
+
+    def poll_orders(self) -> None:
+        """Reconcile cumulative fills even when no market-data tick arrives."""
+        if not self.confirms_orders:
+            return
+        if self.entry_order is not None:
+            order = self.entry_order
+            state = self._apply_order_state(order)
+            if state.terminal:
+                self.entry_order = None
+                # Allocate targets against the actual position, including cancelled partial entries.
+                first = math.floor(self.confirmed_entry_quantity * 0.50 / self.lot_size) * self.lot_size
+                second = math.floor(self.confirmed_entry_quantity * 0.30 / self.lot_size) * self.lot_size
+                self.target_quantities = (first, second, self.confirmed_entry_quantity - first - second)
+                if not self.entered:
+                    self.closed = True
+                print(f"ENTRY {state.order_id}: {state.status}, filled={state.filled_quantity}")
+        if self.exit_order is not None:
+            order = self.exit_order
+            state = self._apply_order_state(order)
+            if state.terminal:
+                self.exit_order = None
+                if state.status in {"REJECTED", "EXPIRED"} and self.remaining_quantity:
+                    raise BrokerStateError(f"Exit {state.order_id} {state.status}; remaining={self.remaining_quantity}")
+                if state.status == "CANCELLED" and not order.cancel_requested and self.remaining_quantity:
+                    raise BrokerStateError(f"Exit {state.order_id} unexpectedly cancelled")
+        if self.entered and self.remaining_quantity == 0 and self.entry_order is None:
+            self.closed = True
+        if self.exit_requested and not self.closed and self.entry_order is None and self.exit_order is None:
+            self._submit_confirmed_exit(self.remaining_quantity, self.exit_requested, 0, market=True)
+
+    def _submit_confirmed_exit(self, quantity: int, reason: str, price: float, *, market: bool) -> OrderAction | None:
+        if quantity <= 0 or self.exit_order is not None:
+            return None
+        if market:
+            response = self.executor.market_order(self.symbol, quantity, -1, reason)
+        else:
+            # This is a locally triggered limit SELL, not a resting broker stop order.
+            tick = self.price_tick
+            limit_price = max(tick, round(math.floor(self.active_stoploss * 0.999 / tick) * tick, 8))
+            response = self.executor.limit_order(self.symbol, quantity, -1, limit_price, reason)
+        self.exit_order = TrackedOrder(response, quantity, -1, reason)
+        self.order_history.append(self.exit_order)
+        # Paper orders fill synchronously; live acknowledgements remain pending.
+        if not getattr(self.executor, "live", True):
+            self.poll_orders()
+        return OrderAction(reason, quantity, -1, price)
+
+    def _request_confirmed_exit(self, reason: str, price: float) -> list[OrderAction]:
+        self.exit_requested = reason
+        if self.entry_order is not None:
+            self._cancel_tracked(self.entry_order)
+        if self.exit_order is not None:
+            self._cancel_tracked(self.exit_order)
+        if self.entry_order is None and self.exit_order is None:
+            action = self._submit_confirmed_exit(self.remaining_quantity, reason, price, market=True)
+            return [] if action is None else [action]
+        return []
+
+    def _on_confirmed_price(self, price: float) -> list[OrderAction]:
+        self.poll_orders()
+        if self.closed:
+            return []
+        managing_targets = self.exit_requested is None and (
+            self.exit_order is None or self.exit_order.reason.startswith("target_")
+        )
+        if self.entered and managing_targets:
+            # Observe all crossed levels even while a target sale is partially filled.
+            for index, target in enumerate(self.trade_call.targets):
+                if index in self.targets_hit or price <= target:
+                    continue
+                self.targets_hit.add(index)
+                self.active_stoploss = max(self.active_stoploss, target)
+                if index == 2:
+                    self.trailing = True
+                    self.high_watermark = None
+                    print(f"T3 crossed: retaining runner; trailing SL={self.active_stoploss:g}")
+            self._update_trailing_stop(price)
+        emergency = price <= self.active_stoploss * 0.98
+        if self.entry_order is not None:
+            # Cancel the unfilled buy remainder before any sell; reconcile cancellation races first.
+            if price <= self.active_stoploss or (self.entered and price > self.trade_call.targets[0]):
+                self._cancel_tracked(self.entry_order)
+                if price <= self.active_stoploss:
+                    self.exit_requested = f"stoploss_{self.active_stoploss:g} crossed"
+            return []
+        if self.exit_order is not None:
+            if emergency and not self.exit_requested:
+                self.emergency_exit_sent = True
+                reason = "emergency market exit: active stop-loss breached by 2%"
+                actions = self._request_confirmed_exit(reason, price)
+                return actions + [OrderAction(reason, 0, -1, price)]
+            if price <= self.active_stoploss and not self.exit_requested and self.exit_order.reason.startswith("target_"):
+                return self._request_confirmed_exit("active stop-loss while target exit pending", price)
+            return []
+        if self.exit_requested:
+            return []
+        if self.previous_price is None:
+            return []
+        if not self.entered:
+            trigger = self.trade_call.trigger_range
+            threshold = trigger[1] if trigger else self.trade_call.buy_above
+            if self.previous_price <= threshold < price:
+                if trigger:
+                    buffer = min(max(1.0, 0.5 * (self.atr.value or 0)), price * 0.02)
+                    limit_price = round(math.ceil((price + buffer) / self.price_tick) * self.price_tick, 8)
+                    reason = "trigger range crossed"
+                    response = self.executor.limit_order(self.symbol, self.quantity, 1, limit_price, reason)
+                else:
+                    limit_price = price
+                    reason = "buy-above crossed"
+                    response = self.executor.market_order(self.symbol, self.quantity, 1, reason)
+                self.entry_order = TrackedOrder(response, self.quantity, 1, reason)
+                self.order_history.append(self.entry_order)
+                if not getattr(self.executor, "live", True):
+                    self.poll_orders()
+                return [OrderAction(reason, self.quantity, 1, limit_price)]
+            return []
+        # Level checks also protect fills confirmed after the crossing tick.
+        if price <= self.active_stoploss:
+            reason = f"stoploss_{self.active_stoploss:g} crossed"
+            if emergency:
+                self.emergency_exit_sent = True
+                reason += "; emergency market exit: active stop-loss breached by 2%"
+            action = self._submit_confirmed_exit(self.remaining_quantity, reason, price, market=emergency)
+            return [] if action is None else [action]
+        actions = []
+        for index in (0, 1):
+            if index not in self.targets_hit or index in self.target_exits_sent:
+                continue
+            quantity = min(self.target_quantities[index], self.remaining_quantity)
+            action = self._submit_confirmed_exit(quantity, f"target_{index + 1} crossed", price, market=True)
+            self.target_exits_sent.add(index)
+            if action is not None:
+                actions.append(action)
+            if self.exit_order is not None:
+                break
+        return actions
 
     def _allocate_targets(self) -> tuple[int, int, int]:
         first = math.floor(self.quantity * 0.50 / self.lot_size) * self.lot_size
@@ -380,7 +645,7 @@ class BreakoutTrader:
         trigger_range: tuple[float, float] | None = None,
         buy_above: float | None = None,
     ) -> None:
-        if self.entered or self.closed:
+        if self.entered or self.closed or self.entry_order is not None:
             raise RuntimeError("entry cannot be modified after the trade has started or closed")
         if trigger_range is None and buy_above is None:
             raise ValueError("modified entry requires a range or BUY ABOVE price")
@@ -391,8 +656,10 @@ class BreakoutTrader:
         self.trade_call = replace(self.trade_call, trigger_range=trigger_range, buy_above=buy_above)
 
     def modify_stoploss(self, stoploss: float) -> None:
-        if stoploss <= 0 or (self.entered and stoploss >= self.previous_price):
+        if not math.isfinite(stoploss) or stoploss <= 0 or (self.entered and stoploss >= self.previous_price):
             raise ValueError("modified stop-loss is invalid")
+        if self.trailing and stoploss < self.active_stoploss:
+            raise ValueError("a trailing stop-loss cannot be lowered")
         self.active_stoploss = stoploss
         self.trade_call = replace(self.trade_call, stoploss=stoploss)
 
@@ -416,12 +683,19 @@ class BreakoutTrader:
         return OrderAction(reason, quantity, -1, price)
 
     def manual_exit(self, reason: str = "manual exit", price: float = 0.0) -> list[OrderAction]:
+        if self.confirms_orders:
+            if not self.entered and self.entry_order is None:
+                self.closed = True
+                return []
+            return self._request_confirmed_exit(reason, price)
         action = self._exit_order(self.remaining_quantity, reason, price)
         if action is not None and self.pending_exit is None:
             self.closed = True
         return [] if action is None else [action]
 
     def cancel(self, reason: str = "trade cancelled", price: float = 0.0) -> list[OrderAction]:
+        if self.confirms_orders:
+            return self.manual_exit(reason, price)
         if not self.entered:
             self.closed = True
             return []
@@ -453,9 +727,19 @@ class BreakoutTrader:
         return []
 
     def on_price(self, price: float, timestamp: float | None = None) -> list[OrderAction]:
-        if price <= 0:
+        if not math.isfinite(price) or price <= 0:
             raise ValueError("Price must be positive")
         current_atr = self.atr.update(price, timestamp)
+        if self.confirms_orders:
+            try:
+                return self._on_confirmed_price(price)
+            finally:
+                self.previous_price = price
+        # Compatibility path for the original in-memory/test executors only.
+        # Every real FyersOrderExecutor (including paper mode) uses confirmed fills above.
+        if self.closed:
+            return []
+        self._update_trailing_stop(price)
         pending_actions = self._check_pending_exit(price)
         if self.pending_exit is not None:
             self.previous_price = price
@@ -522,6 +806,12 @@ class BreakoutTrader:
                 continue
             quantity = min(self.target_quantities[index], self.remaining_quantity)
             self.targets_hit.add(index)
+            if index == 2:
+                self.active_stoploss = max(self.active_stoploss, target)
+                self.trailing = True
+                self.high_watermark = None
+                self._update_trailing_stop(price)
+                continue
             if index in {0, 1}:
                 self.active_stoploss = target
             if quantity:
@@ -723,13 +1013,22 @@ def main() -> None:
     stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])
     print("Waiting for WebSocket ticks and a confirmed upward cross; no order is placed on the first tick.")
-    while not trader.closed:
-        message = stream.wait_for_update(symbol)
-        price = float(message["ltp"])
-        print(f"{symbol} price={price}")
-        trader.on_price(price)
-        if args.interval > 0:
-            time.sleep(args.interval)
+    try:
+        while not trader.closed:
+            trader.poll_orders()
+            if trader.closed:
+                break
+            try:
+                message = stream.wait_for_update(symbol, timeout=1.0)
+            except TimeoutError:
+                continue
+            price = float(message["ltp"])
+            print(f"{symbol} price={price} active_sl={trader.active_stoploss:g} remaining={trader.remaining_quantity}")
+            trader.on_price(price, timestamp=message.get("timestamp"))
+            if args.interval > 0:
+                time.sleep(args.interval)
+    finally:
+        stream.close()
 
 
 if __name__ == "__main__":

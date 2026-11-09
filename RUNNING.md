@@ -1,5 +1,71 @@
 # Fyers market-data MVP
 
+## Current trading behavior (2026-11-10)
+
+T1 and T2 still sell approximately 50% and 30% of the confirmed entry quantity,
+rounded down to whole lots. T3 no longer sells the remainder: it activates a
+runner with its initial active stop-loss at T3. On subsequent new highs:
+
+```text
+gap = max(high_watermark * FYERS_TRAILING_PERCENT / 100,
+          current_one_minute_ATR * FYERS_TRAILING_ATR_MULTIPLE)
+active_stoploss = max(previous_active_stoploss, T3, high_watermark - gap)
+```
+
+Defaults are 3% and 2x ATR. Until ATR is available, the percentage is used.
+The stop never moves down, and only a new high can raise it. These are tunable
+strategy defaults, not a guarantee against normal pullbacks or slippage.
+T3 is the initial floor: if the first T3-crossing tick jumps far above T3, the
+same trailing calculation immediately protects that high rather than waiting
+for an even higher tick.
+The quantity left after T1/T2 stays open until the trailing stop or an explicit
+exit/cancel. With one lot, rounding may leave the whole position as the runner.
+
+On a tick at or below the active stop, the engine submits a locally triggered
+limit SELL slightly below that stop (0.1%, rounded down to `FYERS_PRICE_TICK`,
+default 0.05). This is NOT a resting broker-native stop order: the engine must
+remain running and receive market ticks. If price is at/below 98% of the active
+stop, it uses a market exit instead. If a sell is already pending, the engine
+requests cancellation, waits for confirmed terminal status, accounts for any
+fills during cancellation, and market-sells only the remaining position.
+Rejected cancellation with a still-pending order stops the engine for manual
+reconciliation rather than risking a duplicate sell. A cancellation
+acknowledgement alone never authorizes the replacement sell.
+
+Live entry and exit acknowledgements are tracked by Fyers order ID. The engine
+polls `orderbook(data={"id": order_id})`, default once per second per active order
+(`FYERS_ORDER_POLL_SECONDS`), including while waiting for market ticks. Only
+confirmed cumulative `filledQty` changes the position. Partial entry fills
+count as actual exposure, but pending buy remainders are cancelled and confirmed
+terminal before exits are allowed. Targets use the final confirmed entry size.
+Pending target exits do not block target/stop observation; all crossed targets
+advance protection, and T3 can activate while T1 is still pending.
+
+Order IDs, statuses, fills, remaining quantity, and trailing state are journaled
+for registered Telegram calls. Re-entry waits for the prior position to be
+confirmed flat. Unknown broker outcomes, rejected exits, and unreconciled
+cancellation errors stop the persistent engine with `RECONCILIATION_REQUIRED`;
+they do not advance to another queued trade. Check Fyers before restarting.
+Automatic startup reconciliation is still pending.
+
+The default mock sequence now demonstrates T3, a new high, and a retracement.
+If custom mock prices end while a runner is open, the run reports an incomplete
+simulation instead of claiming the trade closed. Paper fills are simulated
+immediately and are not evidence of live execution quality.
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v -b
+```
+
+All original tests are preserved; additional tests cover fill transitions,
+partial fills, cancellation races, T3 trailing, active-stop emergency exits,
+polling without market ticks, journaling, and re-entry sequencing.
+
+Broker schema references: [order lookup](https://fyers.in/api-docs/v3/api/trading/order-book/get-order-by-order-id/)
+and [order status/filled quantities](https://fyers.in/api-docs/v3/api/trading/webhooks/webhook-response/).
+
+## API setup
+
 This service returns current Fyers quotes for NIFTY 50 and SENSEX, plus the
 nearest call and put strikes from each index option chain.
 

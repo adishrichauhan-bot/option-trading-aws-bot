@@ -1,5 +1,11 @@
 # Option Trading Bot Preparation
 
+> 2026-11-10 update: older sections below are historical notes. For current T3
+> runner behavior, confirmed broker fills, active-stop 2% breach handling, and
+> re-entry sequencing, see [Current trading behavior](./RUNNING.md#current-trading-behavior-2026-11-10).
+> T3 no longer closes the remaining position. The runner stays open until its
+> trailing stop or an explicit exit. Startup reconciliation is still pending.
+
 This file records the development and EC2 setup completed so far. Never commit real credentials, PEM files, access tokens, or `.env` values.
 
 ## Project files
