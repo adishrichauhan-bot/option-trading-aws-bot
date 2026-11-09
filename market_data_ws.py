@@ -25,6 +25,7 @@ class FyersMarketDataSocket:
         self._lock = threading.RLock()
         self._started = False
         self._connected = False
+        self._error: str | None = None
         self._socket = data_ws.FyersDataSocket(
             access_token=f"{client_id}:{access_token}",
             log_path="",
@@ -56,7 +57,13 @@ class FyersMarketDataSocket:
             event.set()
 
     def _on_error(self, message: Any) -> None:
+        error_text = str(message)
+        with self._lock:
+            self._error = error_text
+            events = list(self._events.values())
         print(f"Fyers market-data WebSocket error: {message}")
+        for event in events:
+            event.set()
 
     def _on_close(self, message: Any) -> None:
         with self._lock:
@@ -90,6 +97,8 @@ class FyersMarketDataSocket:
     def wait_for(self, symbol: str, timeout: float = 10.0) -> dict[str, Any]:
         self.subscribe([symbol])
         with self._lock:
+            if self._error is not None:
+                raise RuntimeError(f"Fyers market-data WebSocket failed: {self._error}")
             message = self._prices.get(symbol)
             event = self._events[symbol]
         if message is not None:
@@ -97,6 +106,8 @@ class FyersMarketDataSocket:
         if not event.wait(timeout):
             raise TimeoutError(f"No WebSocket market-data message received for {symbol}")
         with self._lock:
+            if self._error is not None:
+                raise RuntimeError(f"Fyers market-data WebSocket failed: {self._error}")
             message = self._prices.get(symbol)
         if message is None:
             raise TimeoutError(f"No WebSocket market-data message received for {symbol}")
@@ -112,6 +123,8 @@ class FyersMarketDataSocket:
         deadline = time.monotonic() + timeout
         while True:
             with self._lock:
+                if self._error is not None:
+                    raise RuntimeError(f"Fyers market-data WebSocket failed: {self._error}")
                 if self._sequences.get(symbol, 0) > sequence:
                     return self._prices[symbol]
             if time.monotonic() >= deadline:

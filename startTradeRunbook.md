@@ -24,7 +24,8 @@ python telegram_trade_listener.py --list-dialogs
 Step-6. 
 Start  live engine
 tmux new -s trader
-cd ~/option-trading-aws-bot
+or
+tmux attach -t trader
 source .venv/bin/activate
 python live_trader.py --telegram-session "$TELEGRAM_SESSION"
 

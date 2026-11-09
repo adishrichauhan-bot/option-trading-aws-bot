@@ -549,13 +549,18 @@ def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
 
 def authenticated_credentials() -> tuple[str, str]:
     # Keep Fyers imports out of parser-only usage.
-    from auth import read_tokens
+    from auth import access_token_works, read_tokens
 
     client_id = os.getenv("FYERS_CLIENT_ID") or os.getenv("client_id")
     tokens = read_tokens()
     access_token = os.getenv("FYERS_ACCESS_TOKEN") or tokens.get("access_token")
     if not client_id or not access_token:
         raise RuntimeError("Run auth.py first to create a usable cached access token")
+    if not access_token_works(client_id, access_token):
+        raise RuntimeError(
+            "Fyers access token is expired or invalid. Run `python auth.py` "
+            "to refresh or regenerate it, then restart live_trader.py."
+        )
     return client_id, access_token
 
 
