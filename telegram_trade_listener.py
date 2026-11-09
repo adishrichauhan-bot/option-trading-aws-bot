@@ -324,20 +324,7 @@ def _required_env(name: str) -> str:
 def _prepare_session_path(session: str) -> str:
     """Create the directory needed by Telethon's SQLite session file."""
 
-    # The desktop UI is often configured from the runbook, where Linux users
-    # write ``$HOME/.telegram/...``. Normalize that spelling before handing
-    # the path to Windows pathlib; surrounding quotes are also common when a
-    # shell command was copied from documentation.
-    normalized = str(session).strip().strip('"').strip("'")
-    home = str(Path.home())
-    normalized = re.sub(
-        r"^\$HOME(?=[\\/])", lambda _match: home, normalized, flags=re.IGNORECASE
-    )
-    normalized = re.sub(
-        r"^\$\{HOME\}(?=[\\/])", lambda _match: home, normalized, flags=re.IGNORECASE
-    )
-    normalized = os.path.expandvars(normalized)
-    session_path = Path(normalized).expanduser()
+    session_path = Path(session).expanduser()
     session_path.parent.mkdir(parents=True, exist_ok=True)
     return str(session_path)
 
