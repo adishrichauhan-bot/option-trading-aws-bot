@@ -44,6 +44,10 @@ RANGE_RE = re.compile(
     rf"(?P<low>{NUMBER})\s*{DASHES}\s*(?P<high>{NUMBER})\s*$",
     re.IGNORECASE,
 )
+BUY_ABOVE_RE = re.compile(
+    rf"^\s*BUY\s+ABOVE\s*{SEPARATOR}\s*(?P<price>{NUMBER})\s*$",
+    re.IGNORECASE,
+)
 TARGET_RE = re.compile(
     rf"^\s*TARGETS?\s*{SEPARATOR}\s*(?P<values>{NUMBER}(?:\s*,\s*{NUMBER}){{2}})\s*$",
     re.IGNORECASE,
@@ -60,17 +64,19 @@ class TradeCallMessage:
     """A validated trade call extracted from a Telegram message."""
 
     instrument_name: str
-    trigger_range: tuple[float, float]
+    trigger_range: tuple[float, float] | None
     targets: tuple[float, float, float]
     stoploss: float
     raw_text: str
+    buy_above: float | None = None
     message_id: Optional[int] = None
     chat_id: Optional[int] = None
     message_date: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        value["trigger_range"] = list(self.trigger_range)
+        if self.trigger_range is not None:
+            value["trigger_range"] = list(self.trigger_range)
         value["targets"] = list(self.targets)
         return value
 
@@ -103,7 +109,7 @@ class TradeCallAssembler:
                 )
                 candidates.append(
                     re.sub(
-                        r"(BUYING\s*RANGE|TRIGGER\s*RANGE|TARGETS?|STOP\s*-?\s*LOSS|STOPLOSS|SL)",
+                        r"(BUYING\s*RANGE|TRIGGER\s*RANGE|BUY\s*ABOVE|TARGETS?|STOP\s*-?\s*LOSS|STOPLOSS|SL)",
                         r"\n\1",
                         with_announcement_boundary,
                         flags=re.IGNORECASE,
@@ -137,30 +143,96 @@ def _clean_lines(text: str) -> list[str]:
 
 
 def _find_call_lines(lines: list[str]) -> Optional[tuple[str, str, str, str]]:
-    """Find the four call fields even when a message has extra text."""
+    """Find the four call fields even when Telegram adds quoted prefixes.
+
+    Telegram messages from the signal channel can contain a channel header or
+    a quoted copy of an earlier message before the actual field, for example:
+    ``Finobulls PREMIUM BUYING RANGE - 132 - 138``.  Extract the field from
+    inside the line instead of requiring the whole line to match exactly.
+    """
+
+    instrument_search = re.compile(
+        rf"(?P<instrument>(?:[A-Z][A-Z0-9_&.-]*)(?::[A-Z0-9_&.-]+)?\s+"
+        rf"{NUMBER}\s+(?:CE|PE))\b",
+        re.IGNORECASE,
+    )
+    range_search = re.compile(
+        rf"(?:BUYING\s+RANGE|TRIGGER\s+RANGE)\s*{SEPARATOR}\s*"
+        rf"(?P<low>{NUMBER})\s*(?:{DASHES}|TO)\s*(?P<high>{NUMBER})",
+        re.IGNORECASE,
+    )
+    buy_above_search = re.compile(
+        rf"BUY\s+ABOVE\s*{SEPARATOR}\s*(?P<price>{NUMBER})",
+        re.IGNORECASE,
+    )
+    target_search = re.compile(
+        rf"TARGETS?\s*{SEPARATOR}\s*"
+        rf"(?P<values>{NUMBER}\s*,\s*{NUMBER}\s*,\s*{NUMBER})",
+        re.IGNORECASE,
+    )
+    stoploss_search = re.compile(
+        rf"(?:SL|STOP\s*-?\s*LOSS|STOPLOSS)\s*{SEPARATOR}\s*"
+        rf"(?P<value>{NUMBER})",
+        re.IGNORECASE,
+    )
 
     for instrument_index, line in enumerate(lines):
-        if not INSTRUMENT_RE.fullmatch(line):
+        instrument_match = instrument_search.search(line)
+        if instrument_match is None:
             continue
 
         range_index = next(
-            (index for index in range(instrument_index + 1, len(lines)) if RANGE_RE.fullmatch(lines[index])),
+            (
+                index
+                for index in range(instrument_index, len(lines))
+                if (
+                    range_search.search(lines[index]) is not None
+                    or buy_above_search.search(lines[index]) is not None
+                )
+            ),
             None,
         )
         if range_index is None:
             continue
         target_index = next(
-            (index for index in range(range_index + 1, len(lines)) if TARGET_RE.fullmatch(lines[index])),
+            (
+                index
+                for index in range(range_index, len(lines))
+                if target_search.search(lines[index]) is not None
+            ),
             None,
         )
         if target_index is None:
             continue
         stoploss_index = next(
-            (index for index in range(target_index + 1, len(lines)) if STOPLOSS_RE.fullmatch(lines[index])),
+            (
+                index
+                for index in range(target_index, len(lines))
+                if stoploss_search.search(lines[index]) is not None
+            ),
             None,
         )
         if stoploss_index is not None:
-            return lines[instrument_index], lines[range_index], lines[target_index], lines[stoploss_index]
+            range_match = range_search.search(lines[range_index])
+            target_match = target_search.search(lines[target_index])
+            stoploss_match = stoploss_search.search(lines[stoploss_index])
+            assert target_match is not None
+            assert stoploss_match is not None
+            buy_above_match = buy_above_search.search(lines[range_index])
+            if buy_above_match is not None:
+                entry_line = f"BUY ABOVE - {buy_above_match.group('price')}"
+            else:
+                assert range_match is not None
+                entry_line = (
+                    f"TRIGGER RANGE - {range_match.group('low')} - "
+                    f"{range_match.group('high')}"
+                )
+            return (
+                instrument_match.group("instrument"),
+                entry_line,
+                f"TARGET - {target_match.group('values')}",
+                f"SL - {stoploss_match.group('value')}",
+            )
     return None
 
 
@@ -182,29 +254,48 @@ def parse_trade_call(text: str) -> Optional[TradeCallMessage]:
 
     instrument_match = INSTRUMENT_RE.fullmatch(call_lines[0])
     range_match = RANGE_RE.fullmatch(call_lines[1])
+    buy_above_match = BUY_ABOVE_RE.fullmatch(call_lines[1])
     target_match = TARGET_RE.fullmatch(call_lines[2])
     stoploss_match = STOPLOSS_RE.fullmatch(call_lines[3])
-    if not all((instrument_match, range_match, target_match, stoploss_match)):
+    if not all((instrument_match, target_match, stoploss_match)) or not (
+        range_match or buy_above_match
+    ):
         return None
 
     instrument = instrument_match.group("instrument").upper()
-    trigger_low = float(range_match.group("low"))
-    trigger_high = float(range_match.group("high"))
     targets = tuple(float(value) for value in target_match.group("values").split(","))
     stoploss = float(stoploss_match.group("value"))
 
-    if trigger_low > trigger_high:
-        raise ValueError("trigger range lower bound must not exceed upper bound")
     if not all(first < second for first, second in zip(targets, targets[1:])):
         raise ValueError("targets must be strictly increasing")
-    if targets[0] <= trigger_high:
-        raise ValueError("the first target must be above the trigger range")
-    if stoploss >= trigger_low:
-        raise ValueError("stop-loss must be below the trigger range")
+
+    trigger_range: tuple[float, float] | None
+    buy_above: float | None
+    if range_match:
+        trigger_low = float(range_match.group("low"))
+        trigger_high = float(range_match.group("high"))
+        if trigger_low > trigger_high:
+            raise ValueError("trigger range lower bound must not exceed upper bound")
+        if targets[0] <= trigger_high:
+            raise ValueError("the first target must be above the trigger range")
+        if stoploss >= trigger_low:
+            raise ValueError("stop-loss must be below the trigger range")
+        trigger_range = (trigger_low, trigger_high)
+        buy_above = None
+    else:
+        assert buy_above_match is not None
+        entry = float(buy_above_match.group("price"))
+        if targets[0] <= entry:
+            raise ValueError("the first target must be above BUY ABOVE price")
+        if stoploss >= entry:
+            raise ValueError("stop-loss must be below BUY ABOVE price")
+        trigger_range = None
+        buy_above = entry
 
     return TradeCallMessage(
         instrument_name=instrument,
-        trigger_range=(trigger_low, trigger_high),
+        trigger_range=trigger_range,
+        buy_above=buy_above,
         targets=targets,  # type: ignore[arg-type]
         stoploss=stoploss,
         raw_text=raw_text,

@@ -81,12 +81,18 @@ def read_quantity(value: int | None, label: str, env_name: str, default: int) ->
 def telegram_call_to_signal(call: TradeCallMessage) -> str:
     """Convert a validated Telegram call to the trading parser's format."""
 
-    low, high = call.trigger_range
     targets = ", ".join(f"{target:g}" for target in call.targets)
+    if call.trigger_range is not None:
+        low, high = call.trigger_range
+        entry_line = f"TRIGGER RANGE - {low:g} - {high:g}"
+    else:
+        if call.buy_above is None:
+            raise ValueError("Telegram trade call has no entry condition")
+        entry_line = f"BUY ABOVE - {call.buy_above:g}"
     return "\n".join(
         [
             call.instrument_name,
-            f"TRIGGER RANGE - {low:g} - {high:g}",
+            entry_line,
             f"TARGET - {targets}",
             f"SL - {call.stoploss:g}",
         ]
