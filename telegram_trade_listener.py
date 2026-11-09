@@ -21,9 +21,11 @@ import json
 import os
 import re
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from trade_lifecycle import TradeCommand, parse_trade_command
 
 try:
     from dotenv import load_dotenv
@@ -72,6 +74,7 @@ class TradeCallMessage:
     message_id: Optional[int] = None
     chat_id: Optional[int] = None
     message_date: Optional[str] = None
+    source_message_ids: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -118,9 +121,14 @@ class TradeCallAssembler:
             for candidate in candidates:
                 call = parse_trade_call(candidate)
                 if call is not None:
+                    call = replace(call, source_message_ids=tuple(item[0] for item in self._chunks))
                     self._chunks.clear()
                     return call
         return None
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._chunks)
 
     def clear(self) -> None:
         self._chunks.clear()
@@ -435,7 +443,7 @@ async def _process_message(
     message: Any,
     assembler: TradeCallAssembler,
     seen_ids: set[int],
-    on_trade_call: Callable[[TradeCallMessage], None] | None = None,
+    on_trade_call: Callable[[TradeCallMessage | TradeCommand], None] | None = None,
 ) -> None:
     """Append one message chunk and print only completed trade calls."""
 
@@ -445,6 +453,32 @@ async def _process_message(
     seen_ids.add(message_id)
 
     raw_text = message.raw_text or ""
+    reply_to = getattr(message, "reply_to_msg_id", None)
+    if reply_to is None:
+        reply = getattr(message, "reply_to", None)
+        reply_to = getattr(reply, "reply_to_msg_id", None)
+
+    # Control messages are emitted immediately. Standalone TARGET/SL lines
+    # are controls only after an initial call has already been completed;
+    # while an initial call is being assembled they remain call chunks.
+    command = parse_trade_command(
+        raw_text, message_id=message_id, reply_to_message_id=reply_to
+    )
+    if command is None and not assembler.has_pending:
+        standalone = re.search(r"\b(?:TARGETS?|SL|STOP\s*-?\s*LOSS)\b", raw_text, re.IGNORECASE)
+        if standalone:
+            command = parse_trade_command(
+                "MODIFY " + raw_text,
+                message_id=message_id,
+                reply_to_message_id=reply_to,
+            )
+    if command is not None:
+        print("Trade control command received.", flush=True)
+        print(json.dumps(asdict(command), separators=(",", ":"), default=str), flush=True)
+        if on_trade_call is not None:
+            on_trade_call(command)
+        return
+
     print(f"Received message id={message_id}; appending chunk...", flush=True)
     call = assembler.append(message_id, raw_text)
     if call is None:
@@ -470,7 +504,7 @@ async def _listen(
     session: str,
     once: bool,
     limit: int,
-    on_trade_call: Callable[[TradeCallMessage], None] | None = None,
+    on_trade_call: Callable[[TradeCallMessage | TradeCommand], None] | None = None,
     stop_event: Any | None = None,
     show_all: bool = False,
     message_id_range: tuple[int, int] | None = None,
@@ -550,7 +584,7 @@ async def _listen(
 async def listen_for_trade_calls(
     chat_ref: str,
     session: str,
-    on_trade_call: Callable[[TradeCallMessage], None],
+    on_trade_call: Callable[[TradeCallMessage | TradeCommand], None],
     stop_event: Any | None = None,
 ) -> None:
     """Continuously deliver completed Telegram trade calls to a callback."""

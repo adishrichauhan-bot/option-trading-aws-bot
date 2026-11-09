@@ -14,7 +14,7 @@ import os
 import re
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -233,6 +233,22 @@ class FyersOrderExecutor:
         }
         return self._place_order(order, reason)
 
+    def is_order_filled(self, response: Any) -> bool:
+        """Return a conservative fill decision for an exit response.
+
+        Fyers may acknowledge an order before it is filled. Missing status is
+        therefore treated as pending in live mode so the emergency guard can
+        protect the remaining position.
+        """
+        if not self.live:
+            return True
+        if not isinstance(response, dict):
+            return False
+        status = response.get("status", response.get("orderStatus"))
+        if isinstance(status, str):
+            return status.upper() in {"FILLED", "TRADED", "COMPLETE", "EXECUTED"}
+        return status == 2
+
 
 # India has a fixed UTC+05:30 offset and does not observe daylight saving time.
 INDIA_TIMEZONE = dt.timezone(dt.timedelta(hours=5, minutes=30), name="IST")
@@ -349,6 +365,8 @@ class BreakoutTrader:
         self.atr = OneMinuteATR(
             period=int(os.getenv("FYERS_ATR_PERIOD", "14"))
         )
+        self.pending_exit: tuple[Any, int, float] | None = None
+        self.emergency_exit_sent = False
 
     def _allocate_targets(self) -> tuple[int, int, int]:
         first = math.floor(self.quantity * 0.50 / self.lot_size) * self.lot_size
@@ -356,10 +374,95 @@ class BreakoutTrader:
         third = self.quantity - first - second
         return first, second, third
 
+    def modify_entry(
+        self,
+        *,
+        trigger_range: tuple[float, float] | None = None,
+        buy_above: float | None = None,
+    ) -> None:
+        if self.entered or self.closed:
+            raise RuntimeError("entry cannot be modified after the trade has started or closed")
+        if trigger_range is None and buy_above is None:
+            raise ValueError("modified entry requires a range or BUY ABOVE price")
+        if trigger_range is not None:
+            low, high = trigger_range
+            if low > high:
+                raise ValueError("modified trigger range is invalid")
+        self.trade_call = replace(self.trade_call, trigger_range=trigger_range, buy_above=buy_above)
+
+    def modify_stoploss(self, stoploss: float) -> None:
+        if stoploss <= 0 or (self.entered and stoploss >= self.previous_price):
+            raise ValueError("modified stop-loss is invalid")
+        self.active_stoploss = stoploss
+        self.trade_call = replace(self.trade_call, stoploss=stoploss)
+
+    def modify_targets(self, targets: tuple[float, ...]) -> None:
+        if len(targets) != 3 or not all(first < second for first, second in zip(targets, targets[1:])):
+            raise ValueError("exactly three ascending targets are required")
+        if targets[0] <= self.active_stoploss:
+            raise ValueError("first target must be above the active stop-loss")
+        self.trade_call = replace(self.trade_call, targets=targets)  # type: ignore[arg-type]
+
+    def _exit_order(self, quantity: int, reason: str, price: float) -> OrderAction | None:
+        if quantity <= 0:
+            return None
+        response = self.executor.market_order(self.symbol, quantity, -1, reason)
+        is_filled = getattr(self.executor, "is_order_filled", None)
+        filled = True if is_filled is None else bool(is_filled(response))
+        if filled:
+            self.remaining_quantity = max(0, self.remaining_quantity - quantity)
+        else:
+            self.pending_exit = (response, quantity, self.active_stoploss)
+        return OrderAction(reason, quantity, -1, price)
+
+    def manual_exit(self, reason: str = "manual exit", price: float = 0.0) -> list[OrderAction]:
+        action = self._exit_order(self.remaining_quantity, reason, price)
+        if action is not None and self.pending_exit is None:
+            self.closed = True
+        return [] if action is None else [action]
+
+    def cancel(self, reason: str = "trade cancelled", price: float = 0.0) -> list[OrderAction]:
+        if not self.entered:
+            self.closed = True
+            return []
+        return self.manual_exit(reason, price)
+
+    def _check_pending_exit(self, price: float) -> list[OrderAction]:
+        if self.pending_exit is None:
+            return []
+        response, quantity, stoploss = self.pending_exit
+        is_filled = getattr(self.executor, "is_order_filled", None)
+        if is_filled is not None and is_filled(response):
+            self.remaining_quantity = 0
+            self.pending_exit = None
+            self.closed = True
+            return []
+        if price <= stoploss * 0.98 and not self.emergency_exit_sent:
+            self.emergency_exit_sent = True
+            emergency = self.executor.market_order(
+                self.symbol, quantity, -1, "emergency market exit: stop-loss order pending >2%"
+            )
+            filled = True if is_filled is None else bool(is_filled(emergency))
+            if filled:
+                self.remaining_quantity = 0
+                self.pending_exit = None
+                self.closed = True
+            else:
+                self.pending_exit = (emergency, quantity, stoploss)
+            return [OrderAction("emergency market exit: stop-loss order pending >2%", quantity, -1, price)]
+        return []
+
     def on_price(self, price: float, timestamp: float | None = None) -> list[OrderAction]:
         if price <= 0:
             raise ValueError("Price must be positive")
         current_atr = self.atr.update(price, timestamp)
+        pending_actions = self._check_pending_exit(price)
+        if self.pending_exit is not None:
+            self.previous_price = price
+            return pending_actions
+        if pending_actions and self.closed:
+            self.previous_price = price
+            return pending_actions
         if self.previous_price is None:
             self.previous_price = price
             return []
@@ -371,7 +474,10 @@ class BreakoutTrader:
             crossed_trigger_range = bool(
                 trigger_range and previous <= trigger_range[1] < price
             )
-            crossed_buy_above = previous <= self.trade_call.buy_above < price
+            crossed_buy_above = (
+                self.trade_call.buy_above is not None
+                and previous <= self.trade_call.buy_above < price
+            )
             if crossed_trigger_range:
                 reason = "trigger range crossed"
                 raw_buffer = max(1.0, 0.5 * (current_atr or 0.0))
@@ -402,10 +508,12 @@ class BreakoutTrader:
             quantity = self.remaining_quantity
             if quantity:
                 reason = f"stoploss_{self.active_stoploss:g} crossed"
-                self.executor.market_order(self.symbol, quantity, -1, reason)
-                actions.append(OrderAction(reason, quantity, -1, price))
-            self.remaining_quantity = 0
-            self.closed = True
+                exit_action = self._exit_order(quantity, reason, price)
+                if exit_action is not None:
+                    actions.append(exit_action)
+            if self.pending_exit is None:
+                self.remaining_quantity = 0
+                self.closed = True
             self.previous_price = price
             return actions
 
@@ -417,11 +525,9 @@ class BreakoutTrader:
             if index in {0, 1}:
                 self.active_stoploss = target
             if quantity:
-                self.executor.market_order(
-                    self.symbol, quantity, -1, f"target_{index + 1} crossed"
-                )
-                actions.append(OrderAction(f"target_{index + 1} crossed", quantity, -1, price))
-                self.remaining_quantity -= quantity
+                exit_action = self._exit_order(quantity, f"target_{index + 1} crossed", price)
+                if exit_action is not None:
+                    actions.append(exit_action)
 
         if self.remaining_quantity == 0:
             self.closed = True

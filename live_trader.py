@@ -27,6 +27,7 @@ from trading import (
     resolve_option_symbol,
 )
 from telegram_trade_listener import TradeCallMessage, listen_for_trade_calls
+from trade_lifecycle import TradeCommand, TradeRegistry
 
 
 def _positive_int(value: str, label: str) -> int:
@@ -102,10 +103,10 @@ def telegram_call_to_signal(call: TradeCallMessage) -> str:
 def _telegram_worker(
     chat: str,
     session: str,
-    calls: Queue[TradeCallMessage | BaseException],
+    calls: Queue[TradeCallMessage | TradeCommand | BaseException],
     stop_event: Event,
 ) -> None:
-    def on_trade_call(call: TradeCallMessage) -> None:
+    def on_trade_call(call: TradeCallMessage | TradeCommand) -> None:
         calls.put(call)
 
     try:
@@ -133,7 +134,44 @@ def _mock_price_sequence(signal: object, raw_prices: str | None) -> list[float]:
     return [start, crossing_price, targets[0] + 1, targets[1] + 1, targets[2] + 1]
 
 
-def run_trade(args: argparse.Namespace, signal_text: str) -> None:
+def _command_applies(command: TradeCommand, trade_id: str, source_message_ids: tuple[int, ...]) -> bool:
+    if command.trade_id is not None:
+        return command.trade_id == trade_id
+    if command.reply_to_message_id is not None and source_message_ids:
+        # Telegram often replies to the immediately preceding MODIFY ENTRY
+        # message rather than to the original multi-message call. There is
+        # only one active trade in this engine, so keep the command attached
+        # to that active trade when the reply is outside its original chunks.
+        return True
+    return True
+
+
+def _signal_with_command(signal: object, command: TradeCommand) -> str:
+    if command.trigger_range is not None:
+        entry = f"TRIGGER RANGE - {command.trigger_range[0]:g} - {command.trigger_range[1]:g}"
+    elif command.buy_above is not None:
+        entry = f"BUY ABOVE - {command.buy_above:g}"
+    else:
+        entry = f"BUY ABOVE - {getattr(signal, 'buy_above'):g}"
+    targets = command.targets or getattr(signal, "targets")
+    stoploss = command.stoploss if command.stoploss is not None else getattr(signal, "stoploss")
+    return "\n".join([
+        command.instrument_name or getattr(signal, "instrument_name"),
+        entry,
+        "TARGET - " + ", ".join(f"{value:g}" for value in targets),
+        f"SL - {stoploss:g}",
+    ])
+
+
+def run_trade(
+    args: argparse.Namespace,
+    signal_text: str,
+    *,
+    event_queue: Queue[TradeCallMessage | TradeCommand | BaseException] | None = None,
+    pending_signals: list[str] | None = None,
+    trade_id: str = "manual",
+    source_message_ids: tuple[int, ...] = (),
+) -> None:
     """Run one trade and return so the caller can wait for another signal."""
     signal = parse_trade_call(signal_text)
     quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY", default=100)
@@ -156,6 +194,7 @@ def run_trade(args: argparse.Namespace, signal_text: str) -> None:
     mode = "MOCK DRY RUN" if args.mock_market else ("LIVE" if live else "DRY RUN")
     print("\nTrade preflight")
     print(json.dumps({
+        "trade_id": trade_id,
         "instrument": signal.instrument_name,
         "trigger_range": signal.trigger_range,
         "buy_above": signal.buy_above,
@@ -194,7 +233,45 @@ def run_trade(args: argparse.Namespace, signal_text: str) -> None:
 
     try:
         while not trader.closed:
-            message = stream.wait_for_update(symbol)
+            if event_queue is not None:
+                while True:
+                    try:
+                        event = event_queue.get_nowait()
+                    except Exception:
+                        break
+                    if isinstance(event, BaseException):
+                        raise event
+                    if isinstance(event, TradeCallMessage):
+                        if pending_signals is not None:
+                            pending_signals.append(telegram_call_to_signal(event))
+                        continue
+                    if not _command_applies(event, trade_id, source_message_ids):
+                        print(f"Ignoring control command for another trade: {event.raw_text}")
+                        continue
+                    if event.action == "MODIFY_ENTRY":
+                        trader.modify_entry(trigger_range=event.trigger_range, buy_above=event.buy_above)
+                        print(f"{trade_id}: entry modified")
+                    elif event.action == "MODIFY_SL" and event.stoploss is not None:
+                        trader.modify_stoploss(event.stoploss)
+                        print(f"{trade_id}: stop-loss modified to {event.stoploss:g}")
+                    elif event.action == "MODIFY_TARGETS" and event.targets is not None:
+                        trader.modify_targets(event.targets)
+                        print(f"{trade_id}: targets modified")
+                    elif event.action == "CANCEL":
+                        trader.cancel("Telegram cancellation")
+                    elif event.action == "EXIT":
+                        trader.manual_exit("Telegram manual exit")
+                    elif event.action == "REENTRY" and pending_signals is not None:
+                        if trader.entered and not trader.closed:
+                            trader.manual_exit("Telegram re-entry requested")
+                        pending_signals.append(_signal_with_command(signal, event))
+                        trader.closed = True
+            try:
+                message = stream.wait_for_update(
+                    symbol, timeout=min(1.0, max(0.05, args.interval or 1.0))
+                )
+            except TimeoutError:
+                continue
             price = float(message["ltp"])
             timestamp = message.get("timestamp")
             actions = trader.on_price(price, timestamp=timestamp)
@@ -257,7 +334,11 @@ def main() -> None:
 
     telegram_thread: Thread | None = None
     telegram_stop = Event()
-    calls: Queue[TradeCallMessage | BaseException] | None = None
+    calls: Queue[TradeCallMessage | TradeCommand | BaseException] | None = None
+    pending_signals: list[str] = []
+    registry = TradeRegistry(
+        os.getenv("TRADE_REGISTRY_PATH", "~/.fyers/trade_lifecycle.sqlite3")
+    )
     if args.telegram_chat:
         calls = Queue()
         telegram_thread = Thread(
@@ -272,22 +353,50 @@ def main() -> None:
     try:
         while True:
             if calls is not None:
-                item = calls.get()
-                if isinstance(item, BaseException):
-                    raise item
-                signal_text = telegram_call_to_signal(item)
-                print("Telegram trade call accepted as the trading-engine input.")
+                if pending_signals:
+                    item = None
+                    signal_text = pending_signals.pop(0)
+                    trade_id = "reentry"
+                    source_message_ids = ()
+                else:
+                    item = calls.get()
+                    if isinstance(item, BaseException):
+                        raise item
+                    if isinstance(item, TradeCommand):
+                        print(f"Ignoring control command without an active trade: {item.raw_text}")
+                        continue
+                    signal_text = telegram_call_to_signal(item)
+                    trade_id = registry.create(
+                        {"instrument": item.instrument_name, "message_id": item.message_id}
+                    )
+                    source_message_ids = item.source_message_ids
+                    print(f"Telegram trade call accepted as {trade_id}.")
             else:
                 signal_text = read_signal(args.signal_file)
+                trade_id = "manual"
+                source_message_ids = ()
 
             try:
-                run_trade(args, signal_text)
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "ACTIVE")
+                run_trade(
+                    args,
+                    signal_text,
+                    event_queue=calls,
+                    pending_signals=pending_signals,
+                    trade_id=trade_id,
+                    source_message_ids=source_message_ids,
+                )
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "CLOSED")
                 print("Trade completed. Returning to Telegram listener for the next trade call.")
                 if calls is None:
                     return
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "ERROR", error=str(exc))
                 print(f"Trade stopped before completion: {exc}")
                 if calls is None:
                     raise
