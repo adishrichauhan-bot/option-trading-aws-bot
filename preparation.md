@@ -178,6 +178,28 @@ only after checking Fyers positions and open orders, then start it again to
 apply new sizing. Keep the API bound to `127.0.0.1`; do not expose this
 control page directly to the public internet.
 
+## Simple Windows desktop control panel
+
+For local setup and troubleshooting, use [`desktop_control.py`](./desktop_control.py).
+It uses Tkinter and provides buttons for saving `.env`, launching Fyers
+authentication, listing Telegram dialogs, and starting or stopping the real
+`live_trader.py` process.
+
+Run it from PowerShell:
+
+```powershell
+cd "C:/Users/prabh/WorkSpace/option-trading-bot-aws/option-trading-aws-bot"
+\.venv\Scripts\python.exe desktop_control.py
+```
+
+Fill in and save `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` before starting the
+engine. The browser error `Missing required environment variable:
+TELEGRAM_API_ID` means this value was absent from `.env`; the desktop form
+exposes it directly. Authentication and Telegram dialog listing open a
+separate console because they may require phone, OTP, 2FA, or pasted redirect
+input. The Stop button stops the process but does not close broker positions;
+verify Fyers positions and orders first.
+
 ## Trade-call MVP
 
 Supported format: `NIFTY 23450 CE`, `BUY ABOVE - 140`, `TARGET - 150, 163, 180`, `SL - 127`.

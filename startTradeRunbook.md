@@ -35,6 +35,19 @@ window:
 ssh -i "C:/Users/prabh/Downloads/aws-asus-option-trad-pem.pem" -L 8000:127.0.0.1:8000 ec2-user@CURRENT_PUBLIC_IP
 Then browse to `http://127.0.0.1:8000/trader`.
 
+For a simpler Windows desktop control panel, run locally from PowerShell:
+
+```powershell
+cd "C:/Users/prabh/WorkSpace/option-trading-bot-aws/option-trading-aws-bot"
+\.venv\Scripts\python.exe desktop_control.py
+```
+
+Use **Save .env** first. Fill in `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`,
+`TELEGRAM_PHONE`, `TELEGRAM_CHAT`, `TELEGRAM_SESSION`, and the Fyers fields.
+Then use **Fyers login/auth**, **List Telegram chats**, and finally **Start
+engine**. Authentication opens in a separate console window when interaction
+is required.
+
 Step-7.
 Start  live engine
 tmux new -s trader

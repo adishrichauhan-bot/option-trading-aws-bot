@@ -73,9 +73,20 @@ class TraderProcessManager:
             selected_chat = telegram_chat or os.getenv("TELEGRAM_CHAT")
             if not selected_chat:
                 raise ValueError("Telegram chat is required; set TELEGRAM_CHAT or enter it in the UI")
+            missing_telegram = [
+                name for name in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH")
+                if not os.getenv(name)
+            ]
+            if missing_telegram:
+                raise ValueError(
+                    "Missing required Telegram configuration: "
+                    + ", ".join(missing_telegram)
+                    + "; save .env before starting"
+                )
             self.settings = TraderSettings(selected_quantity, selected_lot_size)
             command = [
                 sys.executable,
+                "-u",
                 str(self.project_dir / "live_trader.py"),
                 "--quantity",
                 str(selected_quantity),
