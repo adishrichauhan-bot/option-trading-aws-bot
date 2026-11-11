@@ -108,9 +108,13 @@ def parse_trade_command(
                                 raw_text=raw, message_id=message_id,
                                 reply_to_message_id=reply_to_message_id)
 
-    if re.search(r"\b(?:MODIFY\s+)?TARGETS?\b", upper):
-        values = _numbers(upper.split("TARGET", 1)[-1])
-        if len(values) >= 2:
+    # Plain TARGET fields belong to initial calls. The listener promotes a
+    # standalone field to MODIFY only when no call is being assembled.
+    target_update = re.search(r"\bMODIFY\s+TARGETS?\s*[-:]?\s*([\d., /-]+)", upper)
+    if target_update:
+        # Stop at the next field label; SL and trade IDs are not target prices.
+        values = _numbers(target_update.group(1))
+        if len(values) == 3:
             return TradeCommand("MODIFY_TARGETS", trade_id=trade_id, targets=values,
                                 raw_text=raw, message_id=message_id,
                                 reply_to_message_id=reply_to_message_id)

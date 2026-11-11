@@ -465,7 +465,7 @@ async def _process_message(
         raw_text, message_id=message_id, reply_to_message_id=reply_to
     )
     if command is None and not assembler.has_pending:
-        standalone = re.search(r"\b(?:TARGETS?|SL|STOP\s*-?\s*LOSS)\b", raw_text, re.IGNORECASE)
+        standalone = re.match(r"\s*(?:TARGETS?|SL|STOP\s*-?\s*LOSS)\b", raw_text, re.IGNORECASE)
         if standalone:
             command = parse_trade_command(
                 "MODIFY " + raw_text,

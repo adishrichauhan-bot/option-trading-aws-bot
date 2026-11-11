@@ -2,6 +2,22 @@
 
 Last reviewed: 2026-11-10 (Asia/Calcutta)
 
+## Telegram signal-routing fix — 2026-11-11
+
+Server message 55091 (`TARGET - 174, 186, 202` followed by `SL - 152`)
+was misclassified as a target modification and discarded without an active
+trade. Plain target fields now remain initial-call chunks while assembly is
+pending; only explicit `MODIFY TARGET` text is a direct command. Standalone
+target/SL updates remain supported when no call is being assembled. Target
+modification parsing stops at the next field label and requires three prices,
+so SL cannot become a fourth target.
+
+[Routing regression tests](./tests/test_telegram_message_routing.py) cover the
+server chunk, split targets/SL, a complete single-message call, explicit updates,
+standalone updates, and duplicate delivery. Seven tests failed before the fix;
+all eight passed afterwards. Full suite: 47 tests passed on local Python 3.12.
+This fix does not replay missed signals or restart/deploy the server.
+
 ## Implementation update — 2026-11-10
 
 This update supersedes older descriptions below of T3 liquidation and missing
