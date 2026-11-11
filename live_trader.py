@@ -20,6 +20,7 @@ from market_data_ws import FyersMarketDataSocket, MockMarketDataSocket
 from trading import (
     BreakoutTrader,
     BrokerStateError,
+    TradingAuthenticationError,
     FyersOrderExecutor,
     authenticated_client,
     authenticated_credentials,
@@ -106,11 +107,15 @@ def _telegram_worker(
     session: str,
     calls: Queue[TradeCallMessage | TradeCommand | BaseException],
     stop_event: Event,
+    mock_market: bool = False,
 ) -> None:
     def on_trade_call(call: TradeCallMessage | TradeCommand) -> None:
         calls.put(call)
 
     try:
+        if not mock_market:
+            authenticated_credentials()
+            print("Fyers authentication verified. Starting Telegram listener for NEW calls.", flush=True)
         asyncio.run(listen_for_trade_calls(chat, session, on_trade_call, stop_event))
     except BaseException as exc:  # Forward listener failures to the main thread.
         calls.put(exc)
@@ -216,7 +221,7 @@ def run_trade(
         print(f"Mock prices: {prices}")
     else:
         client_id, access_token = authenticated_credentials()
-        client = authenticated_client()
+        client = authenticated_client((client_id, access_token))
         symbol = resolve_option_symbol(client, signal)
         print(f"Resolved Fyers symbol: {symbol}")
         stream = FyersMarketDataSocket(client_id, access_token)
@@ -386,11 +391,11 @@ def main() -> None:
         calls = Queue()
         telegram_thread = Thread(
             target=_telegram_worker,
-            args=(args.telegram_chat, args.telegram_session, calls, telegram_stop),
+            args=(args.telegram_chat, args.telegram_session, calls, telegram_stop, args.mock_market),
             name="telegram-trade-listener",
             daemon=True,
         )
-        print(f"Listening continuously for trade calls from Telegram chat {args.telegram_chat}...")
+        print(f"Preparing Telegram listener for chat {args.telegram_chat}; checking Fyers readiness first...")
         telegram_thread.start()
 
     try:
@@ -441,6 +446,11 @@ def main() -> None:
                     return
             except KeyboardInterrupt:
                 raise
+            except TradingAuthenticationError as exc:
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "AUTH_REQUIRED", error=str(exc))
+                print(f"Trading stopped: authentication required. {exc}", flush=True)
+                return
             except BrokerStateError as exc:
                 if trade_id not in {"manual", "reentry"}:
                     registry.update(trade_id, "RECONCILIATION_REQUIRED", error=str(exc))
@@ -453,6 +463,8 @@ def main() -> None:
                 if calls is None:
                     raise
                 print("Returning to Telegram listener for the next trade call.")
+    except TradingAuthenticationError as exc:
+        print(f"Trading NOT READY: {exc}", flush=True)
     except KeyboardInterrupt:
         print("\nTrading engine stopped.")
     finally:

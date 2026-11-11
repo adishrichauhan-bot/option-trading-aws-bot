@@ -28,6 +28,44 @@ TOKEN_ENDPOINT = "https://api-t1.fyers.in/api/v3/validate-authcode"
 REFRESH_ENDPOINT = "https://api-t1.fyers.in/api/v3/validate-refresh-token"
 
 
+class FyersAuthenticationError(RuntimeError):
+    """Interactive login/configuration is needed; never expose credential values."""
+
+
+def trading_credentials() -> tuple[str, str]:
+    """Validate or refresh credentials without browser prompts in the trading loop."""
+    client_id = os.getenv("FYERS_CLIENT_ID") or os.getenv("client_id")
+    if not client_id:
+        raise FyersAuthenticationError("Fyers client ID is missing. Configure .env and run python auth.py.")
+    cached = read_tokens()
+    # An old environment override must not hide a newly generated cache token.
+    candidates = dict.fromkeys((os.getenv("FYERS_ACCESS_TOKEN"), cached.get("access_token")))
+    for token in candidates:
+        if token and access_token_works(client_id, token):
+            return client_id, token
+    refresh_token = os.getenv("refresh_token") or cached.get("refresh_token")
+    secret_key, pin = os.getenv("secret_key"), os.getenv("pin")
+    if not (refresh_token and secret_key and pin):
+        raise FyersAuthenticationError(
+            "Fyers access token is unusable and automatic refresh needs a refresh token, secret_key and pin. "
+            "Run python auth.py interactively on this server before starting the engine. "
+            "A token file existing does not mean its token is valid."
+        )
+    try:
+        refreshed = refresh_access_token(client_id, secret_key, refresh_token, pin)
+        token = refreshed.get("access_token")
+        if not token or not access_token_works(client_id, token):
+            raise ValueError("Refreshed token failed validation")
+        write_tokens({**cached, **refreshed})
+    except Exception:
+        # Refresh responses/exceptions can include credentials; do not forward them.
+        raise FyersAuthenticationError(
+            "Fyers automatic token refresh failed. Run python auth.py interactively on this server."
+        ) from None
+    print("Fyers access token refreshed and validated.", flush=True)
+    return client_id, token
+
+
 def required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:

@@ -1,5 +1,31 @@
 # Fyers market-data MVP
 
+## Authentication readiness (2026-11-11)
+
+Run `python auth.py` on EC2 each morning and wait for `Fyers authentication is
+ready.` A nonempty token file is not proof of a valid token. On 2026-11-11 the
+server successfully assembled both SENSEX calls but Fyers profile requests
+returned code -16 (invalid/expired token), so no order could be submitted.
+
+The engine now validates Fyers before starting Telegram consumption and again
+before a trade. It refreshes an expired token non-interactively when a refresh
+token, `secret_key`, and `pin` are available, validates the refreshed token, then
+atomically updates the cache. A stale `FYERS_ACCESS_TOKEN` environment override
+cannot hide a working cache token. No secrets are printed on refresh failure.
+Without those refresh prerequisites, run the interactive `python auth.py` login.
+Startup prints `Trading NOT READY` rather than appearing to listen successfully;
+a later authentication failure marks the registered call `AUTH_REQUIRED` and
+stops instead of discarding subsequent signals. Mock-market mode skips Fyers.
+
+Use `python live_trader.py` to read Telegram settings directly from `.env`.
+Passing `--telegram-session "$TELEGRAM_SESSION"` from a shell that has not exported
+that variable overrides the configured path with an empty string.
+
+The supplied 2026-11-11 message sequence is retained in the offline test fixture.
+It emits exactly four initial calls plus the two explicit full-exit messages;
+progress updates and duplicate event/poll deliveries do not create extra calls.
+Historical calls are never automatically replayed as live orders after login.
+
 ## Current trading behavior (2026-11-10)
 
 T1 and T2 still sell approximately 50% and 30% of the confirmed entry quantity,

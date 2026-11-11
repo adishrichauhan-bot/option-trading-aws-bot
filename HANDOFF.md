@@ -2,6 +2,29 @@
 
 Last reviewed: 2026-11-10 (Asia/Calcutta)
 
+## Authentication incident and readiness fix — 2026-11-11
+
+After deploying the Telegram routing fix, EC2 logs confirmed correct assembly
+of SENSEX 82000 PE (330 entry) and SENSEX 82100 PE (380 entry). Both failed
+before symbol resolution because Fyers rejected the cached access token.
+A read-only profile check confirmed code -16, invalid/expired token. EC2 had
+a refresh token and secret but no configured `pin`, so unattended refresh was
+not possible. The listener restarted at message 55100, after the morning NIFTY
+calls; it intentionally does not backfill old calls.
+
+The trading path now validates/refreshes credentials before Telegram startup
+and each trade, with no interactive browser prompt inside the listener.
+Missing refresh prerequisites require `python auth.py` on EC2. Authentication
+failures stop consumption visibly instead of returning to apparent readiness.
+The updated runbook validates authentication rather than token-file existence.
+
+An offline fixture reproduces all four user-supplied calls, commentary, media
+placeholders, and exits. The replay emits exactly four complete calls, survives
+the engine parser, and de-duplicates event/poll delivery. Local validation:
+57 tests passed. Live recovery still requires the account holder's interactive
+login or private PIN configuration; never request credentials in chat and never
+replay the historical messages into the live engine.
+
 ## Telegram signal-routing fix — 2026-11-11
 
 Server message 55091 (`TARGET - 174, 186, 202` followed by `SL - 152`)

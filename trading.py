@@ -167,6 +167,10 @@ class BrokerStateError(RuntimeError):
     """Stop accepting new trades when broker exposure cannot safely be established."""
 
 
+class TradingAuthenticationError(RuntimeError):
+    """Do not consume further signals until Fyers authentication is restored."""
+
+
 @dataclass(frozen=True)
 class OrderState:
     order_id: str
@@ -945,25 +949,18 @@ def resolve_option_symbol(client: Any, trade_call: TradeCall) -> str:
 
 def authenticated_credentials() -> tuple[str, str]:
     # Keep Fyers imports out of parser-only usage.
-    from auth import access_token_works, read_tokens
+    from auth import FyersAuthenticationError, trading_credentials
 
-    client_id = os.getenv("FYERS_CLIENT_ID") or os.getenv("client_id")
-    tokens = read_tokens()
-    access_token = os.getenv("FYERS_ACCESS_TOKEN") or tokens.get("access_token")
-    if not client_id or not access_token:
-        raise RuntimeError("Run auth.py first to create a usable cached access token")
-    if not access_token_works(client_id, access_token):
-        raise RuntimeError(
-            "Fyers access token is expired or invalid. Run `python auth.py` "
-            "to refresh or regenerate it, then restart live_trader.py."
-        )
-    return client_id, access_token
+    try:
+        return trading_credentials()
+    except FyersAuthenticationError as exc:
+        raise TradingAuthenticationError(str(exc)) from None
 
 
-def authenticated_client() -> Any:
+def authenticated_client(credentials: tuple[str, str] | None = None) -> Any:
     from auth import build_client
 
-    client_id, access_token = authenticated_credentials()
+    client_id, access_token = credentials or authenticated_credentials()
     return build_client(client_id, access_token)
 
 
@@ -1003,7 +1000,7 @@ def main() -> None:
         f"{'LIVE' if live else 'DRY RUN'} (weekdays, 09:00-15:40 IST)."
     )
     client_id, access_token = authenticated_credentials()
-    client = authenticated_client()
+    client = authenticated_client((client_id, access_token))
     symbol = resolve_option_symbol(client, trade_call)
     print(json.dumps({"signal": trade_call.__dict__, "symbol": symbol, "live": live}, default=str))
 
