@@ -14,7 +14,7 @@ SIGNAL = "NIFTY 25000 CE\nTRIGGER RANGE - 100 - 101\nTARGET - 102, 103, 104\nSL 
 
 
 class LiveOrderIntegrationTests(unittest.TestCase):
-    def run_scripted_trade(self, *, reentry=False):
+    def run_scripted_trade(self, *, reentry=False, awaiting_levels=False):
         client = Mock()
         client.place_order.side_effect = lambda order: {"s": "ok", "id": f"O{client.place_order.call_count}"}
         rows = {"O1": {"id": "O1", "status": 6, "filledQty": 0}}
@@ -35,7 +35,7 @@ class LiveOrderIntegrationTests(unittest.TestCase):
                 rows["O1"] = {"id": "O1", "status": 2, "filledQty": 100}
                 stages.append("entry filled without tick")
                 if reentry:
-                    events.put(TradeCommand("REENTRY", trigger_range=(100, 101)))
+                    events.put(TradeCommand("REENTRY", trigger_range=(100, 101), awaiting_levels=awaiting_levels))
                 raise TimeoutError()
             if len(stages) == 1 and not reentry:
                 stages.append("stop tick")
@@ -64,13 +64,16 @@ class LiveOrderIntegrationTests(unittest.TestCase):
         self.assertEqual(registry.update.call_args.args[1], "CLOSED")
         self.assertEqual(registry.update.call_args.kwargs["remaining_quantity"], 0)
         self.assertEqual([order["id"] for order in registry.update.call_args.kwargs["orders"]], ["O1", "O2"])
-        self.assertEqual(len(pending), int(reentry))
+        self.assertEqual(len(pending), int(reentry and not awaiting_levels))
 
     def test_orders_reconcile_during_market_data_timeouts_and_journal_ids(self):
         self.run_scripted_trade()
 
     def test_reentry_waits_for_confirmed_exit_before_returning(self):
         self.run_scripted_trade(reentry=True)
+
+    def test_split_reentry_closes_old_position_without_queuing_old_risk_levels(self):
+        self.run_scripted_trade(reentry=True, awaiting_levels=True)
 
     def test_broker_uncertainty_does_not_start_next_queued_trade(self):
         FakeListenerThread.instances.clear()

@@ -2,6 +2,29 @@
 
 Last reviewed: 2026-11-10 (Asia/Calcutta)
 
+## Nov-12 incident and continuation update
+
+Production evidence: the first 09:27 SENSEX 82100 CE call parsed correctly,
+but its trade was marked authentication-required and the engine exited.
+The user logged in again and restarted around 10:33 IST; listener baseline
+55195 excluded the prior calls intentionally. A profile check during this
+investigation succeeded, but unattended refresh was still not configured.
+Yesterday's successful login does not ensure next-morning authentication.
+
+Implemented pending-entry replacement before initial targets/SL, and split
+re-entry assembly with a remembered instrument and fresh targets/SL. A
+re-entry waiting for risk levels closes an active prior trade but cannot
+queue an entry with stale levels. New instrument headers reset incomplete
+state; invalid calls are rejected without killing Telegram consumption.
+Regression cases cover the supplied 340 buy-above, 390–400 range, 350–360
+range, 355 re-entry with SL 335, and 270–280 recovery modification.
+
+Local validation: 64 tests passed; existing broker lifecycle/trailing tests
+remain green. No historical live orders were replayed. Broker diagnostics
+reported an existing open position, so a live-engine restart requires position
+reconciliation; do not assume the bot restores it. Startup reconciliation
+remains the next separate development task.
+
 ## Authentication incident and readiness fix — 2026-11-11
 
 After deploying the Telegram routing fix, EC2 logs confirmed correct assembly

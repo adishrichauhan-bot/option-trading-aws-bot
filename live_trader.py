@@ -116,6 +116,7 @@ def _telegram_worker(
         if not mock_market:
             authenticated_credentials()
             print("Fyers authentication verified. Starting Telegram listener for NEW calls.", flush=True)
+            print("Authentication is valid NOW, not indefinitely. Run auth.py each trading morning unless unattended refresh is configured with pin.", flush=True)
         asyncio.run(listen_for_trade_calls(chat, session, on_trade_call, stop_event))
     except BaseException as exc:  # Forward listener failures to the main thread.
         calls.put(exc)
@@ -299,7 +300,8 @@ def run_trade(
                         trader.manual_exit("Telegram manual exit")
                     elif event.action == "REENTRY" and pending_signals is not None:
                         trader.manual_exit("Telegram re-entry requested")
-                        pending_signals.append(_signal_with_command(signal, event))
+                        if not event.awaiting_levels:
+                            pending_signals.append(_signal_with_command(signal, event))
                     if trader.closed:
                         break
                 journal()

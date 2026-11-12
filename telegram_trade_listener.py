@@ -90,8 +90,48 @@ class TradeCallAssembler:
     def __init__(self, max_messages: int = 30) -> None:
         self._chunks: list[tuple[int, str]] = []
         self._max_messages = max_messages
+        self._last_call: TradeCallMessage | None = None
+
+    @property
+    def pending_instrument(self) -> str | None:
+        for _, chunk in reversed(self._chunks):
+            for line in _clean_lines(chunk):
+                match = INSTRUMENT_RE.fullmatch(line)
+                if match:
+                    return match.group("instrument").upper()
+        return None
+
+    def prepare_entry_command(self, command: TradeCommand) -> str | None:
+        """Replace an unstarted entry or assemble a re-entry with NEW risk levels."""
+        instrument = self.pending_instrument
+        if command.trade_id is not None:
+            # Do not infer an instrument for an explicitly different/unknown trade ID.
+            return None
+        if command.action == "REENTRY" and instrument is None and self._last_call is not None:
+            instrument = self._last_call.instrument_name
+        if instrument is None:
+            return None
+        if command.trigger_range is not None:
+            low, high = command.trigger_range
+            entry = f"TRIGGER RANGE - {low:g} - {high:g}"
+        elif command.buy_above is not None:
+            entry = f"BUY ABOVE - {command.buy_above:g}"
+        else:
+            return None
+        # Never inherit the old entry/SL/targets into a newly announced setup.
+        lines = [instrument, entry]
+        if command.targets is not None:
+            lines.append("TARGET - " + ", ".join(f"{target:g}" for target in command.targets))
+        if command.stoploss is not None:
+            lines.append(f"SL - {command.stoploss:g}")
+        self.clear()
+        return "\n".join(lines)
 
     def append(self, message_id: int, text: str) -> Optional[TradeCallMessage]:
+        if any(INSTRUMENT_RE.fullmatch(line) for line in _clean_lines(text)):
+            # A new announcement must not complete an older incomplete instrument.
+            self.clear()
+            self._last_call = None
         self._chunks.append((message_id, text))
         self._chunks.sort(key=lambda item: item[0])
         self._chunks = self._chunks[-self._max_messages :]
@@ -123,6 +163,7 @@ class TradeCallAssembler:
                 if call is not None:
                     call = replace(call, source_message_ids=tuple(item[0] for item in self._chunks))
                     self._chunks.clear()
+                    self._last_call = call
                     return call
         return None
 
@@ -464,6 +505,15 @@ async def _process_message(
     command = parse_trade_command(
         raw_text, message_id=message_id, reply_to_message_id=reply_to
     )
+    if command is not None and command.action in {"MODIFY_ENTRY", "REENTRY"}:
+        replacement = assembler.prepare_entry_command(command)
+        if replacement is not None:
+            if command.action == "REENTRY" and on_trade_call is not None:
+                # Request closure now, but do not queue entry using the previous call's SL/targets.
+                on_trade_call(replace(command, awaiting_levels=True))
+            print(f"Assembling {command.action} with updated entry; waiting for complete risk levels.", flush=True)
+            raw_text = replacement
+            command = None
     if command is None and not assembler.has_pending:
         standalone = re.match(r"\s*(?:TARGETS?|SL|STOP\s*-?\s*LOSS)\b", raw_text, re.IGNORECASE)
         if standalone:
@@ -480,7 +530,12 @@ async def _process_message(
         return
 
     print(f"Received message id={message_id}; appending chunk...", flush=True)
-    call = assembler.append(message_id, raw_text)
+    try:
+        call = assembler.append(message_id, raw_text)
+    except ValueError as exc:
+        assembler.clear()
+        print(f"Rejected invalid trade call: {exc}. Waiting for a new complete setup.", flush=True)
+        return
     if call is None:
         print("Trade call incomplete; waiting for the next chunk.", flush=True)
         return

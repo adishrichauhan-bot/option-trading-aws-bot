@@ -1,5 +1,34 @@
 # Fyers market-data MVP
 
+## Nov-12 missed-call investigation and split-message fixes
+
+EC2 logs show the 09:27 SENSEX 82100 CE call was assembled correctly, then
+authentication failed and the engine stopped. Its next startup was about
+10:33 IST at message 55195, after the supplied calls. Logging in the previous
+evening is not proof of valid credentials the next morning. Validate every
+trading morning or privately configure the refresh PIN. Do not replay those
+historical setups as new live orders.
+
+The Nov-12 message formats also exposed two parser/state defects, now fixed:
+
+- `MODIFY ENTRY` before initial targets/SL replaces the pending entry instead
+  of becoming an ignored active-trade control. The recovery call uses range
+  270–280 with targets 300/320/355 and SL 250, not the superseded 340 entry.
+- `RE ENTRY - ABOVE - 355` retains the known instrument but waits for NEW
+  targets/SL (375/400/435 and 335). It requests closure of an existing trade
+  without queuing a new entry using stale risk levels. Once complete, the
+  new call is handled normally. No known instrument means no invented call.
+- A new instrument announcement clears an older incomplete setup; malformed
+  risk levels are rejected without terminating the Telegram listener.
+
+The single-active-trade queue policy is unchanged. Recognizing a call does
+not mean every call executes concurrently or that an above-trigger first
+price is treated as a confirmed upward crossing. Broker prices/fills, not
+channel progress messages, drive entry/SL/target execution.
+
+Validation: the complete local suite passes 64 tests, including Nov-12
+signal formats and confirmed-close sequencing for split re-entry.
+
 ## Authentication readiness (2026-11-11)
 
 Run `python auth.py` on EC2 each morning and wait for `Fyers authentication is

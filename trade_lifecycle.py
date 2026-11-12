@@ -28,6 +28,7 @@ class TradeCommand:
     raw_text: str = ""
     message_id: int | None = None
     reply_to_message_id: int | None = None
+    awaiting_levels: bool = False
 
 
 _NUMBER = r"\d+(?:\.\d+)?"
@@ -73,7 +74,7 @@ def parse_trade_command(
             rf"(?:BUYING\s+RANGE|TRIGGER\s+RANGE|RANGE)\s*[-:]?\s*({_NUMBER})\s*(?:-|TO)\s*({_NUMBER})",
             upper,
         )
-        above_match = re.search(rf"BUY\s+ABOVE\s*[-:]?\s*({_NUMBER})", upper)
+        above_match = re.search(rf"\b(?:BUY\s+)?ABOVE\s*[-:]?\s*({_NUMBER})", upper)
         trigger_range = None
         buy_above = None
         if range_match:

@@ -8,6 +8,9 @@ python -m pip check
 
 Step-3 : Validate Fyers authentication every morning
 python auth.py
+Do this BEFORE the first trade each day, even if login succeeded yesterday.
+The Nov-12 09:27 signal was parsed, but yesterday's token had expired and
+the process stopped. Restarting at 10:33 cannot recover the earlier calls.
 Wait for "Fyers authentication is ready." before continuing.
 A token file existing does not mean the access token is still valid.
 Complete the displayed browser/redirect login when requested.
@@ -25,6 +28,8 @@ The engine reads TELEGRAM_CHAT and TELEGRAM_SESSION from .env itself.
 Do not pass an empty shell TELEGRAM_SESSION override.
 Wait for "Fyers authentication verified" and the logged-in Telegram account.
 If it prints "Trading NOT READY", complete Step-3 and start the engine again.
+Before restarting, check existing Fyers positions/open orders. Do not assume
+the engine restores or manages an already open broker position after restart.
 
 
 Step-6.
