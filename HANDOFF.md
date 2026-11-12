@@ -2,6 +2,24 @@
 
 Last reviewed: 2026-11-10 (Asia/Calcutta)
 
+## Automatic sizing implementation
+
+[position_sizing.py](./position_sizing.py) now obtains the exact contract's
+`minLotSize` from the Fyers symbol master and reads fresh Available Balance
+at the breakout. Real trades ignore FYERS_LOT_SIZE/FYERS_QUANTITY; explicit
+quantity/lot-size options are mock-only. Both entry points size against the
+actual limit price or market-entry LTP through BreakoutTrader's entry_sizer
+hook, before submission. Existing confirmed-fill/exit/trailing logic remains.
+
+The original ceiling request is available as `FYERS_SIZING_ROUNDING=ceil`
+(CLI default); an over-budget ceiling result is SKIPPED_SIZING, never an
+unaffordable live order. `floor` selects affordable whole lots. The rounding
+choice was raised with the user because ceiling normally exceeds a fully
+allocated cash budget. See current deployment/chat status for the selected
+production mode. FYERS_MAX_QUANTITY remains a cap and FYERS_FUNDS_RESERVE
+defaults to zero. Local sizing regression tests cover both rules, metadata,
+funds lookup, price/funds changes and no-entry failure behavior.
+
 ## Nov-12 incident and continuation update
 
 Production evidence: the first 09:27 SENSEX 82100 CE call parsed correctly,

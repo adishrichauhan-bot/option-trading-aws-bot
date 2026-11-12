@@ -16,11 +16,12 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from dotenv import load_dotenv
 
 from market_data_ws import FyersMarketDataSocket
+from position_sizing import FundsSizer, SizingError, contract_spec
 
 load_dotenv()
 
@@ -427,6 +428,8 @@ class BreakoutTrader:
         quantity: int,
         lot_size: int,
         executor: OrderExecutor,
+        *,
+        entry_sizer: Callable[[float], int] | None = None,
     ) -> None:
         if quantity <= 0 or lot_size <= 0 or quantity % lot_size:
             raise ValueError("quantity must be a positive multiple of lot_size")
@@ -435,6 +438,7 @@ class BreakoutTrader:
         self.quantity = quantity
         self.lot_size = lot_size
         self.executor = executor
+        self.entry_sizer = entry_sizer
         self.previous_price: float | None = None
         self.entered = False
         self.closed = False
@@ -605,10 +609,12 @@ class BreakoutTrader:
                     buffer = min(max(1.0, 0.5 * (self.atr.value or 0)), price * 0.02)
                     limit_price = round(math.ceil((price + buffer) / self.price_tick) * self.price_tick, 8)
                     reason = "trigger range crossed"
+                    self._size_entry(limit_price)
                     response = self.executor.limit_order(self.symbol, self.quantity, 1, limit_price, reason)
                 else:
                     limit_price = price
                     reason = "buy-above crossed"
+                    self._size_entry(price)
                     response = self.executor.market_order(self.symbol, self.quantity, 1, reason)
                 self.entry_order = TrackedOrder(response, self.quantity, 1, reason)
                 self.order_history.append(self.entry_order)
@@ -636,6 +642,14 @@ class BreakoutTrader:
             if self.exit_order is not None:
                 break
         return actions
+
+    def _size_entry(self, price: float) -> None:
+        if self.entry_sizer is not None:
+            quantity = self.entry_sizer(price)
+            if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity <= 0 or quantity % self.lot_size:
+                raise ValueError("Entry sizing must return a positive whole-lot quantity")
+            self.quantity = quantity
+            self.target_quantities = self._allocate_targets()
 
     def _allocate_targets(self) -> tuple[int, int, int]:
         first = math.floor(self.quantity * 0.50 / self.lot_size) * self.lot_size
@@ -777,6 +791,7 @@ class BreakoutTrader:
                     f"{current_atr if current_atr is not None else 0:g} "
                     f"buffer={slippage_buffer:g} limit={limit_price:g}"
                 )
+                self._size_entry(limit_price)
                 self.executor.limit_order(
                     self.symbol, self.quantity, 1, limit_price, reason
                 )
@@ -785,6 +800,7 @@ class BreakoutTrader:
                 actions.append(OrderAction(reason, self.quantity, 1, limit_price))
             elif crossed_buy_above:
                 reason = "buy-above crossed"
+                self._size_entry(price)
                 self.executor.market_order(self.symbol, self.quantity, 1, reason)
                 self.entered = True
                 self.remaining_quantity = self.quantity
@@ -967,18 +983,8 @@ def authenticated_client(credentials: tuple[str, str] | None = None) -> Any:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the breakout target/stop strategy")
     parser.add_argument("signal_file", type=Path, help="Text file containing the trade call")
-    parser.add_argument(
-        "--quantity",
-        type=int,
-        default=None,
-        help="Optional quantity override; otherwise FYERS_QUANTITY (default: 100)",
-    )
-    parser.add_argument(
-        "--lot-size",
-        type=int,
-        default=None,
-        help="Optional lot-size override; otherwise FYERS_LOT_SIZE (default: 10)",
-    )
+    parser.add_argument("--sizing-rounding", choices=("floor", "ceil"),
+                        default=os.getenv("FYERS_SIZING_ROUNDING", "ceil"))
     parser.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds")
     parser.add_argument(
         "--parse-only", action="store_true", help="Parse and print the signal without API access"
@@ -990,10 +996,6 @@ def main() -> None:
         print(json.dumps(asdict(trade_call)))
         return
 
-    quantity = int(os.getenv("FYERS_QUANTITY", "100")) if args.quantity is None else args.quantity
-    lot_size = int(os.getenv("FYERS_LOT_SIZE", "10")) if args.lot_size is None else args.lot_size
-    if quantity <= 0 or lot_size <= 0:
-        raise ValueError("FYERS_QUANTITY and FYERS_LOT_SIZE must be greater than zero")
     live = is_live_trading_window()
     print(
         "Automatic session mode: "
@@ -1002,10 +1004,13 @@ def main() -> None:
     client_id, access_token = authenticated_credentials()
     client = authenticated_client((client_id, access_token))
     symbol = resolve_option_symbol(client, trade_call)
+    spec = contract_spec(symbol)
+    sizer = FundsSizer(client, spec, rounding=args.sizing_rounding)
     print(json.dumps({"signal": trade_call.__dict__, "symbol": symbol, "live": live}, default=str))
 
     trader = BreakoutTrader(
-        trade_call, symbol, quantity, lot_size, FyersOrderExecutor(client, live=live)
+        trade_call, symbol, spec.lot_size, spec.lot_size, FyersOrderExecutor(client, live=live),
+        entry_sizer=sizer,
     )
     stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])

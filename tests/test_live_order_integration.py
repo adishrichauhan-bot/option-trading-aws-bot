@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import live_trader
 from trade_lifecycle import TradeCommand
 from trading import BrokerStateError
+from position_sizing import ContractSpec
 from test_live_trader import FakeListenerThread
 
 
@@ -16,6 +17,7 @@ SIGNAL = "NIFTY 25000 CE\nTRIGGER RANGE - 100 - 101\nTARGET - 102, 103, 104\nSL 
 class LiveOrderIntegrationTests(unittest.TestCase):
     def run_scripted_trade(self, *, reentry=False, awaiting_levels=False):
         client = Mock()
+        client.funds.return_value = {"s": "ok", "fund_limit": [{"title": "Available Balance", "equityAmount": 10250}]}
         client.place_order.side_effect = lambda order: {"s": "ok", "id": f"O{client.place_order.call_count}"}
         rows = {"O1": {"id": "O1", "status": 6, "filledQty": 0}}
         client.orderbook.side_effect = lambda data: {"s": "ok", "orderBook": [rows[data["id"]]]}
@@ -48,13 +50,14 @@ class LiveOrderIntegrationTests(unittest.TestCase):
             raise TimeoutError()
 
         stream.wait_for_update.side_effect = next_tick
-        args = Namespace(mock_market=False, quantity=100, lot_size=10, interval=0)
+        args = Namespace(mock_market=False, quantity=None, lot_size=None, interval=0)
         with (
             patch.dict("os.environ", {"FYERS_ORDER_POLL_SECONDS": "0"}),
             patch.object(live_trader, "is_live_trading_window", return_value=True),
             patch.object(live_trader, "authenticated_credentials", return_value=("fake", "fake")),
             patch.object(live_trader, "authenticated_client", return_value=client),
             patch.object(live_trader, "resolve_option_symbol", return_value="NSE:TEST"),
+            patch.object(live_trader, "contract_spec", return_value=ContractSpec("NSE:TEST", 10)),
             patch.object(live_trader, "FyersMarketDataSocket", return_value=stream),
         ):
             closed = live_trader.run_trade(args, SIGNAL, event_queue=events, pending_signals=pending,

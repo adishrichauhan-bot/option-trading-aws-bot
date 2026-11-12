@@ -1,6 +1,6 @@
 """Entry point for the Fyers breakout strategy.
 
-Quantity and lot size are read from the environment. Live mode is enabled
+Quantity is sized from funds and the lot size from contract metadata. Live mode is enabled
 automatically only during the India-market weekday window.
 """
 
@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 from market_data_ws import FyersMarketDataSocket, MockMarketDataSocket
+from position_sizing import FundsSizer, SizingError, contract_spec
 from trading import (
     BreakoutTrader,
     BrokerStateError,
@@ -72,13 +73,6 @@ def normalize_interactive_signal(lines: list[str]) -> str:
         stoploss_line = f"SL - {stoploss_line}"
 
     return "\n".join([instrument, buy_line, target_line, stoploss_line])
-
-
-def read_quantity(value: int | None, label: str, env_name: str, default: int) -> int:
-    raw = str(value) if value is not None else os.getenv(env_name)
-    if raw is None:
-        raw = str(default)
-    return _positive_int(raw, label)
 
 
 def telegram_call_to_signal(call: TradeCallMessage) -> str:
@@ -183,13 +177,14 @@ def run_trade(
 ) -> bool:
     """Return whether the trade is closed; an exhausted mock feed may leave a runner."""
     signal = parse_trade_call(signal_text)
-    quantity = read_quantity(args.quantity, "Quantity", "FYERS_QUANTITY", default=100)
-    lot_size = read_quantity(args.lot_size, "Lot size", "FYERS_LOT_SIZE", default=10)
-    max_quantity = int(os.getenv("FYERS_MAX_QUANTITY", "10000"))
-    if quantity > max_quantity:
-        raise ValueError(f"Quantity {quantity} exceeds FYERS_MAX_QUANTITY={max_quantity}")
-    if quantity % lot_size:
-        raise ValueError(f"Quantity must be a multiple of the lot size ({lot_size})")
+    sizer = None
+    if args.mock_market:
+        quantity = _positive_int(str(args.quantity if args.quantity is not None else 100), "Mock quantity")
+        lot_size = _positive_int(str(args.lot_size if args.lot_size is not None else 10), "Mock lot size")
+    else:
+        if args.quantity is not None or args.lot_size is not None:
+            raise SizingError("--quantity and --lot-size are mock-only; real contracts use automatic sizing")
+        quantity, lot_size = None, None
 
     if args.mock_market:
         live = False
@@ -209,7 +204,7 @@ def run_trade(
         "buy_above": signal.buy_above,
         "targets": signal.targets,
         "stoploss": signal.stoploss,
-        "quantity": quantity,
+        "quantity": quantity if args.mock_market else "calculated from fresh funds at breakout",
         "lot_size": lot_size,
         "mode": mode,
     }, indent=2, default=str))
@@ -225,6 +220,11 @@ def run_trade(
         client = authenticated_client((client_id, access_token))
         symbol = resolve_option_symbol(client, signal)
         print(f"Resolved Fyers symbol: {symbol}")
+        spec = contract_spec(symbol)
+        lot_size = spec.lot_size
+        quantity = lot_size  # Placeholder only; entry_sizer replaces it before any BUY.
+        sizer = FundsSizer(client, spec, rounding=getattr(args, "sizing_rounding", "ceil"))
+        print(f"Contract lot size: {lot_size}; automatic {sizer.rounding} sizing at entry.")
         stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])
     trader = BreakoutTrader(
@@ -233,6 +233,7 @@ def run_trade(
         quantity,
         lot_size,
         FyersOrderExecutor(client, live=live),
+        entry_sizer=sizer,
     )
     journal_snapshot = None
 
@@ -244,6 +245,8 @@ def run_trade(
             "confirmed_entry_quantity": trader.confirmed_entry_quantity,
             "active_stoploss": trader.active_stoploss,
             "trailing": trader.trailing,
+            "lot_size": lot_size,
+            "entry_sizing": sizer.last_result if sizer is not None else None,
             "closed": trader.closed,
             "orders": [
                 {"id": order.response.get("id"), "side": order.side, "quantity": order.quantity,
@@ -372,13 +375,16 @@ def main() -> None:
     parser.add_argument(
         "--quantity",
         type=int,
-        help="Optional quantity override; otherwise FYERS_QUANTITY (default: 100)",
+        help="Mock-market quantity only (default: 100); real trades use fresh funds",
     )
     parser.add_argument(
         "--lot-size",
         type=int,
-        help="Optional lot-size override; otherwise FYERS_LOT_SIZE (default: 10)",
+        help="Mock-market lot size only (default: 10); real contracts use symbol metadata",
     )
+    parser.add_argument("--sizing-rounding", choices=("floor", "ceil"),
+                        default=os.getenv("FYERS_SIZING_ROUNDING", "ceil"),
+                        help="Whole-lot sizing rule; ceil skips orders exceeding funds")
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
     args = parser.parse_args()
 
@@ -453,6 +459,12 @@ def main() -> None:
                     registry.update(trade_id, "AUTH_REQUIRED", error=str(exc))
                 print(f"Trading stopped: authentication required. {exc}", flush=True)
                 return
+            except SizingError as exc:
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "SKIPPED_SIZING", error=str(exc))
+                print(f"Trade skipped before entry: {exc}", flush=True)
+                if calls is None:
+                    return
             except BrokerStateError as exc:
                 if trade_id not in {"manual", "reentry"}:
                     registry.update(trade_id, "RECONCILIATION_REQUIRED", error=str(exc))

@@ -1,5 +1,46 @@
 # Fyers market-data MVP
 
+## Automatic lot size and funds-based sizing
+
+Real trades no longer read `FYERS_LOT_SIZE` or `FYERS_QUANTITY`. After resolving
+the exact contract, both trading CLIs read its `minLotSize` from the daily
+Fyers symbol master. Unknown/inactive contracts or invalid lot metadata stop
+that signal; there is no fallback to a manual lot size.
+
+At the observed breakout, and before a BUY request, the engine reads fresh
+Fyers `fund_limit` data and selects the `Available Balance` row by title.
+NSE/BSE use `equityAmount`; MCX uses `commodityAmount`. Entry sizing uses the
+actual buffered/rounded limit price for range entries and that tick's LTP for
+market entries, not the original Telegram trigger. Market fills can differ
+from LTP, so estimated affordability does not guarantee broker acceptance.
+
+```text
+budget = Available Balance - FYERS_FUNDS_RESERVE
+raw_lots = budget / (entry_price * contract_lot_size)
+quantity = rounded_lots * contract_lot_size
+```
+
+`FYERS_SIZING_ROUNDING=ceil` is the requested ceiling rule, aligned upward to
+whole lots. If the resulting premium exceeds budget, the signal is skipped,
+not submitted or silently rounded down. Except at exact lot-cost multiples,
+ceiling will normally exceed the budget and skip; use `floor` if the intent
+is to buy the maximum affordable number of lots. Both modes retain the
+`FYERS_MAX_QUANTITY` cap (rounded down to whole lots). The optional fixed
+cash reserve defaults to zero; configure it to leave cash for fees/slippage.
+
+Funds errors, insufficient budget for one lot, or invalid sizing mark registered
+signals `SKIPPED_SIZING`; no BUY is submitted. The `ENTRY SIZING` output and
+lifecycle journal record price, funds, lot size, lots and final quantity.
+T1/T2 allocation and the T3 runner then operate on confirmed filled quantities.
+
+`python live_trader.py --mock-market --quantity 100 --lot-size 10` remains
+offline-safe. Those manual options are mock-only; real trading and the
+standalone `trading.py` CLI use automatic sizing. Historical command examples
+below mentioning fixed real quantities/lot sizes are superseded by this section.
+
+Sources: [Fyers funds](https://fyers.in/api-docs/v3/api/account/funds/),
+[symbol master](https://fyers.in/api-docs/v3/api/market-information/symbol-master/symbol-master-json/).
+
 ## Nov-12 missed-call investigation and split-message fixes
 
 EC2 logs show the 09:27 SENSEX 82100 CE call was assembled correctly, then
