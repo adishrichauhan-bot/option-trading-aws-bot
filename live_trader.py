@@ -223,7 +223,7 @@ def run_trade(
         spec = contract_spec(symbol)
         lot_size = spec.lot_size
         quantity = lot_size  # Placeholder only; entry_sizer replaces it before any BUY.
-        sizer = FundsSizer(client, spec, rounding=getattr(args, "sizing_rounding", "ceil"))
+        sizer = FundsSizer(client, spec, rounding=getattr(args, "sizing_rounding", "floor"))
         print(f"Contract lot size: {lot_size}; automatic {sizer.rounding} sizing at entry.")
         stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])
@@ -383,7 +383,7 @@ def main() -> None:
         help="Mock-market lot size only (default: 10); real contracts use symbol metadata",
     )
     parser.add_argument("--sizing-rounding", choices=("floor", "ceil"),
-                        default=os.getenv("FYERS_SIZING_ROUNDING", "ceil"),
+                        default=os.getenv("FYERS_SIZING_ROUNDING", "floor"),
                         help="Whole-lot sizing rule; ceil skips orders exceeding funds")
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
     args = parser.parse_args()

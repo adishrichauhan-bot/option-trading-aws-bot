@@ -69,7 +69,7 @@ def available_balance(response: Any, symbol: str) -> Decimal:
 
 
 def calculate_quantity(funds: Any, price: Any, lot_size: int, *, max_quantity: int = 10000,
-                       reserve: Any = 0, rounding: str = "ceil") -> int:
+                       reserve: Any = 0, rounding: str = "floor") -> int:
     budget = number(funds, "available funds") - number(reserve, "funds reserve")
     unit_price = number(price, "entry price", positive=True)
     lot_size = positive_integer(lot_size, "lot size")
@@ -92,7 +92,7 @@ def calculate_quantity(funds: Any, price: Any, lot_size: int, *, max_quantity: i
 class FundsSizer:
     """Called once at the breakout, using its actual limit price or current LTP."""
 
-    def __init__(self, client: Any, spec: ContractSpec, *, rounding: str = "ceil") -> None:
+    def __init__(self, client: Any, spec: ContractSpec, *, rounding: str = "floor") -> None:
         if rounding not in {"floor", "ceil"}:
             raise SizingError("Sizing rounding must be floor or ceil")
         self.client, self.spec, self.rounding = client, spec, rounding
@@ -106,14 +106,20 @@ class FundsSizer:
         except Exception:
             raise SizingError("Could not retrieve fresh Fyers funds; no entry submitted") from None
         funds = available_balance(response, self.spec.symbol)
-        quantity = calculate_quantity(funds, entry_price, self.spec.lot_size,
-                                      max_quantity=self.max_quantity, reserve=self.reserve,
-                                      rounding=self.rounding)
         self.last_result = {
             "symbol": self.spec.symbol, "available_funds": str(funds), "reserve": str(self.reserve),
             "entry_price": entry_price, "lot_size": self.spec.lot_size,
-            "lots": quantity // self.spec.lot_size, "quantity": quantity,
-            "estimated_premium": str(Decimal(str(entry_price)) * quantity), "rounding": self.rounding,
+            "rounding": self.rounding,
         }
+        try:
+            quantity = calculate_quantity(funds, entry_price, self.spec.lot_size,
+                                          max_quantity=self.max_quantity, reserve=self.reserve,
+                                          rounding=self.rounding)
+        except SizingError as exc:
+            self.last_result.update(status="SKIPPED", reason=str(exc))
+            print("ENTRY SIZING SKIPPED: " + json.dumps(self.last_result), flush=True)
+            raise
+        self.last_result.update(lots=quantity // self.spec.lot_size, quantity=quantity,
+                                estimated_premium=str(Decimal(str(entry_price)) * quantity), status="SIZED")
         print("ENTRY SIZING: " + json.dumps(self.last_result), flush=True)
         return quantity

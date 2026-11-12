@@ -600,6 +600,11 @@ class BreakoutTrader:
         if self.exit_requested:
             return []
         if self.previous_price is None:
+            if not self.entered:
+                threshold = self.trade_call.trigger_range[1] if self.trade_call.trigger_range else self.trade_call.buy_above
+                if price > threshold:
+                    print(f"ENTRY WAIT: first received LTP={price:g} is already above trigger={threshold:g}; "
+                          "no upward cross observed. Waiting for a move to/below trigger and a fresh cross.", flush=True)
             return []
         if not self.entered:
             trigger = self.trade_call.trigger_range
@@ -984,7 +989,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the breakout target/stop strategy")
     parser.add_argument("signal_file", type=Path, help="Text file containing the trade call")
     parser.add_argument("--sizing-rounding", choices=("floor", "ceil"),
-                        default=os.getenv("FYERS_SIZING_ROUNDING", "ceil"))
+                        default=os.getenv("FYERS_SIZING_ROUNDING", "floor"))
     parser.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds")
     parser.add_argument(
         "--parse-only", action="store_true", help="Parse and print the signal without API access"

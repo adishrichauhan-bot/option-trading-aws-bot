@@ -2,6 +2,21 @@
 
 Last reviewed: 2026-11-10 (Asia/Calcutta)
 
+## Afternoon missed-trade fix — floor sizing now supersedes ceiling defaults
+
+Production journal confirms FB-20261112-0004 (SENSEX 81600 PE) and 0005
+(SENSEX 82100 CE) were SKIPPED_SIZING because ceiling exceeded the budget.
+FB-20261112-0003 (SENSEX 81700 PE) was actually filled for 60 units and closed.
+Sizing defaults are now floor everywhere, retaining exact-contract lot metadata,
+fresh funds, reserve and maximum-quantity protection. Ceil is explicit opt-in.
+Sizing skips now persist calculation inputs/reason rather than entry_sizing=None.
+
+The 14:25 SENSEX 82000 CE call first received LTP 96.5 versus trigger 82.
+No-chase/observed-cross entry semantics remain; ENTRY WAIT explains this case.
+Regression tests replay the four supplied afternoon setups using synthetic
+funds and observed broker-price crossings, plus modified SL and late first tick.
+No historical calls are submitted to production to make up missed trades.
+
 ## Automatic sizing implementation
 
 [position_sizing.py](./position_sizing.py) now obtains the exact contract's

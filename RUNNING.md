@@ -1,5 +1,24 @@
 # Fyers market-data MVP
 
+## Afternoon sizing incident fix — affordable whole lots are the default
+
+The Nov-12 13:22 SENSEX 81600 PE and 13:47 SENSEX 82100 CE calls were parsed
+and reached breakout, but ceiling sizing rounded premium above available funds
+and marked both SKIPPED_SIZING. The 11:55 SENSEX 81700 PE call did execute:
+the journal and broker confirm the bot bought 60 units and subsequently exited.
+
+Defaults now use floor across the sizing helper, FundsSizer, both CLIs and
+environment template. For budget B, entry price P and contract lot size L:
+`quantity = floor(B / (P * L)) * L`, subject to the existing max-quantity cap.
+There is no rounding-driven skip when at least one whole lot is affordable.
+Explicit ceil remains available for intentional reject-on-over-budget behavior.
+Skip diagnostics now preserve funds, entry price, lot size, rounding and reason.
+
+The 14:25 SENSEX 82000 CE call's first bot tick was 96.5, already above its 82
+trigger. The observed-cross rule is preserved: the engine does not chase a
+historical breakout using Telegram progress text. It now prints ENTRY WAIT
+explicitly when starting above the trigger rather than appearing unresponsive.
+
 ## Automatic lot size and funds-based sizing
 
 Real trades no longer read `FYERS_LOT_SIZE` or `FYERS_QUANTITY`. After resolving
@@ -20,11 +39,10 @@ raw_lots = budget / (entry_price * contract_lot_size)
 quantity = rounded_lots * contract_lot_size
 ```
 
-`FYERS_SIZING_ROUNDING=ceil` is the requested ceiling rule, aligned upward to
-whole lots. If the resulting premium exceeds budget, the signal is skipped,
-not submitted or silently rounded down. Except at exact lot-cost multiples,
-ceiling will normally exceed the budget and skip; use `floor` if the intent
-is to buy the maximum affordable number of lots. Both modes retain the
+`FYERS_SIZING_ROUNDING=floor` is the default and buys affordable whole lots.
+Explicit `ceil` aligns upward to whole lots and skips results exceeding the
+budget; it is not the default because most fractional budgets would skip.
+Both modes retain the
 `FYERS_MAX_QUANTITY` cap (rounded down to whole lots). The optional fixed
 cash reserve defaults to zero; configure it to leave cash for fees/slippage.
 

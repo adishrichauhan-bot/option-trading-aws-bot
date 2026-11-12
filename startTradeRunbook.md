@@ -41,8 +41,9 @@ Optional Step : to make change in lot size, qty, other env variable :
 Lot size and real trade quantity are now automatic; old FYERS_LOT_SIZE and
 FYERS_QUANTITY settings are ignored. Lot size comes from the exact symbol's
 minLotSize. Fresh Available Balance and the breakout entry price determine size.
-FYERS_SIZING_ROUNDING=ceil retains ceiling but skips unaffordable quantities;
-FYERS_SIZING_ROUNDING=floor buys affordable whole lots instead.
+FYERS_SIZING_ROUNDING=floor is the default and buys affordable whole lots.
+Ceiling rounding caused the Nov-12 afternoon SKIPPED_SIZING failures; do not
+set FYERS_SIZING_ROUNDING=ceil unless those over-budget skips are intentional.
 FYERS_MAX_QUANTITY caps size and FYERS_FUNDS_RESERVE optionally preserves cash.
 Check .env
 grep -E '^(TELEGRAM_CHAT|TELEGRAM_SESSION|FYERS_SIZING_ROUNDING|FYERS_MAX_QUANTITY|FYERS_FUNDS_RESERVE)=' .env
