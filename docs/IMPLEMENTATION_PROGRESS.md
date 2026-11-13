@@ -2,6 +2,30 @@
 
 Date: 2026-11-13. Starting commit: `62f190b`. User authorized implementation of the [review plan](reviews/ASTRA_REVIEW_APPROVAL.md). This records the first implementation batch; the whole roadmap is not complete. Results below describe validation before checkout synchronization. Pulling onto EC2 does not activate changes in an already running process.
 
+## GitHub and EC2 synchronization — 2026-11-13
+
+Phase 1 and the documentation consolidation were committed as `f2196c6`, pushed
+to GitHub `main`, and pulled with `--ff-only` into the existing EC2 checkout.
+The server advanced from `a4aac3a`; its tracked worktree remained clean and
+server-local untracked configuration/session/log/signal files were retained.
+
+The guarded suite then ran on EC2 **Python 3.9.25 / FYERS SDK 3.2.1**:
+**119 tests, 117 passing, 2 expected failures, zero unexpected failures/errors,
+zero guard violations, exit 0** (0.261 seconds reported by unittest). Local
+Python 3.12.0 ran the same suite before push with the same counts (1.366 seconds).
+Both Windows and Linux account-lock tests passed, including child-process death.
+This provides runtime evidence for the exercised cases, not live broker validation.
+
+The existing trading process, PID 156531, retained its original start time
+through checkout synchronization. It was not stopped, restarted or replaced.
+Thus the new version is **available on disk, not activated in that process**.
+No live broker call/order or production database access was needed for this update.
+
+The [operating guide](OPERATIONS.md) now consolidates setup/startup/running
+commands. Root README is navigation; reviews are under `docs/reviews` and the
+historical handoff under `docs/history`. Original guides remain in Git history.
+The sections below retain the initial implementation/validation record.
+
 ## Completed in this batch
 
 | Finding | Change | Evidence and limit |

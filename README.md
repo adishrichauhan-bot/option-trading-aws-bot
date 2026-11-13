@@ -13,20 +13,10 @@ FastAPI service for NIFTY/SENSEX and nearest-strike option market data.
 The operating guide replaces the overlapping preparation, running and startup
 documents. It is the single source for current commands.
 
-## Offline validation
-
-With dependencies installed in the existing project virtualenv:
-
-```powershell
-.\.venv\Scripts\python.exe -B tests/run_offline.py
-```
-
-```bash
-.venv/bin/python -B tests/run_offline.py
-```
-
-The runner uses synthetic broker responses, temporary state and production-access
-guards. Two expected failures remain for tick delivery and reconnect behavior.
+Use the [offline validation workflow](./docs/OPERATIONS.md#validation-and-input-examples)
+for Windows and EC2 test commands. The runner uses synthetic broker responses,
+temporary state and production-access guards. Two expected failures remain for
+tick delivery and reconnect behavior.
 
 Normal broker-backed execution selects live orders automatically on weekdays
 09:00–15:40 IST; it is not an offline test command. Startup refuses unresolved
