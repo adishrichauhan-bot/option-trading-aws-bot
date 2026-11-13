@@ -4,10 +4,12 @@ from unittest.mock import Mock, patch
 
 from trading import BreakoutTrader, BrokerStateError, FyersOrderExecutor
 from test_trading_safety import make_call
+from trading_test_clock import use_monday
 
 
 class BrokerLifecycleTests(unittest.TestCase):
     def setUp(self):
+        use_monday(self)
         self.env = patch.dict("os.environ", {"FYERS_ORDER_POLL_SECONDS": "0"})
         self.env.start()
         self.addCleanup(self.env.stop)

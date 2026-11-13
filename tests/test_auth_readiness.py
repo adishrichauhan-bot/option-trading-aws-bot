@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import auth
 import live_trader
 import trading
+from trading_test_clock import use_monday
 
 
 class TradingCredentialTests(unittest.TestCase):
@@ -73,6 +74,9 @@ class TradingCredentialTests(unittest.TestCase):
 
 
 class ListenerReadinessTests(unittest.TestCase):
+    def setUp(self):
+        use_monday(self)
+
     def test_auth_failure_prevents_starting_telegram(self):
         events = Queue()
         with (patch.object(live_trader, "authenticated_credentials", side_effect=trading.TradingAuthenticationError("login required")),

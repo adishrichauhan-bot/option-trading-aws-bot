@@ -33,6 +33,7 @@ from trading import (
 from telegram_trade_listener import TradeCallMessage, listen_for_trade_calls
 from trade_lifecycle import TradeCommand, TradeRegistry
 from startup_recovery import RecoveryRequired, startup_session
+from trading_policy import TradingDayOff, ensure_trading_day
 
 
 def _positive_int(value: str, label: str) -> int:
@@ -178,6 +179,8 @@ def run_trade(
     registry: TradeRegistry | None = None,
 ) -> bool:
     """Return whether the trade is closed; an exhausted mock feed may leave a runner."""
+    if not args.mock_market:
+        ensure_trading_day()
     signal = parse_trade_call(signal_text)
     sizer = None
     if args.mock_market:
@@ -195,7 +198,7 @@ def run_trade(
         live = is_live_trading_window()
         print(
             "Automatic session mode: "
-            f"{'LIVE' if live else 'DRY RUN'} (weekdays, 09:00-15:40 IST)."
+            f"{'LIVE' if live else 'DRY RUN'} (Monday-Thursday, 09:00-15:40 IST; Friday off)."
         )
     mode = "MOCK DRY RUN" if args.mock_market else ("LIVE" if live else "DRY RUN")
     print("\nTrade preflight")
@@ -393,6 +396,13 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
     args = parser.parse_args()
 
+    if not args.mock_market:
+        try:
+            ensure_trading_day()
+        except TradingDayOff as exc:
+            print(str(exc), flush=True)
+            raise SystemExit(2) from None
+
     registry = TradeRegistry(
         os.getenv("TRADE_REGISTRY_PATH", "~/.fyers/trade_lifecycle.sqlite3")
     )
@@ -480,6 +490,11 @@ def _run_engine(args: argparse.Namespace, registry: TradeRegistry) -> None:
                     registry.update(trade_id, "AUTH_REQUIRED", error=str(exc))
                 print(f"Trading stopped: authentication required. {exc}", flush=True)
                 return
+            except TradingDayOff as exc:
+                if trade_id not in {"manual", "reentry"}:
+                    registry.update(trade_id, "SKIPPED_DAY_OFF", remaining_quantity=0, orders=[])
+                print(str(exc), flush=True)
+                raise SystemExit(2) from None
             except SizingError as exc:
                 if trade_id not in {"manual", "reentry"}:
                     registry.update(trade_id, "SKIPPED_SIZING", error=str(exc))

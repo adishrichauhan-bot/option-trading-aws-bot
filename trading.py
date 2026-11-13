@@ -1,7 +1,8 @@
 """Parse trade calls and execute a cross/target/stop-loss strategy.
 
 This module is dry-run outside the automatic IST weekday market window.
-Live mode is selected automatically from Monday-Friday, 09:00-15:40 IST.
+Live mode is selected automatically Monday-Thursday, 09:00-15:40 IST.
+Friday is a trade off day: startup and new live entries are refused.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from market_data_ws import FyersMarketDataSocket
 from position_sizing import FundsSizer, SizingError, contract_spec
 from startup_recovery import RecoveryRequired, startup_session
 from trade_lifecycle import TradeRegistry
+from trading_policy import TradingDayOff, ensure_trading_day
 
 load_dotenv()
 
@@ -212,6 +214,10 @@ class FyersOrderExecutor:
         self._submitted_quantities: dict[str, int] = {}
 
     def _place_order(self, order: dict[str, Any], reason: str) -> Any:
+        # Recheck at dispatch: an executor may have been armed on Thursday.
+        # Risk-reducing exits remain possible for an existing position.
+        if self.live and order["side"] == 1:
+            ensure_trading_day()
         order_type = "LIMIT" if order["type"] == 1 else "MARKET"
         side = "BUY" if order["side"] == 1 else "SELL"
         limit_price = order.get("limitPrice", 0)
@@ -229,6 +235,10 @@ class FyersOrderExecutor:
             f"quantity={order['qty']} symbol={order['symbol']}"
         )
         print(f"LIVE ORDER PAYLOAD: {json.dumps(order, sort_keys=True)}")
+        if order["side"] == 1:
+            # Logging itself may span midnight; keep this outside the transport
+            # exception handler so refusal is never labelled an unknown write.
+            ensure_trading_day()
         try:
             response = self.client.place_order(order)
         except Exception as exc:
@@ -354,14 +364,14 @@ LIVE_MARKET_END = dt.time(15, 40)
 def is_live_trading_window(now: dt.datetime | None = None) -> bool:
     """Return whether automatic live trading is allowed at the current IST time.
 
-    The live window is Monday-Friday, 09:00:00 through 15:40:00 IST,
+    The live window is Monday-Thursday, 09:00:00 through 15:40:00 IST,
     inclusive. A datetime argument is supported for deterministic tests.
     """
     current = now or dt.datetime.now(INDIA_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=INDIA_TIMEZONE)
     current = current.astimezone(INDIA_TIMEZONE)
-    return current.weekday() < 5 and LIVE_MARKET_START <= current.time() <= LIVE_MARKET_END
+    return current.weekday() < 4 and LIVE_MARKET_START <= current.time() <= LIVE_MARKET_END
 
 
 def ask_live_session() -> bool:
@@ -1010,6 +1020,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if not args.parse_only:
+        try:
+            ensure_trading_day()
+        except TradingDayOff as exc:
+            print(str(exc), flush=True)
+            raise SystemExit(2) from None
+
     trade_call = parse_trade_call(args.signal_file.read_text(encoding="utf-8"))
     if args.parse_only:
         print(json.dumps(asdict(trade_call)))
@@ -1018,7 +1035,7 @@ def main() -> None:
     live = is_live_trading_window()
     print(
         "Automatic session mode: "
-        f"{'LIVE' if live else 'DRY RUN'} (weekdays, 09:00-15:40 IST)."
+        f"{'LIVE' if live else 'DRY RUN'} (Monday-Thursday, 09:00-15:40 IST; Friday off)."
     )
     client_id, access_token = authenticated_credentials()
     client = authenticated_client((client_id, access_token))
@@ -1026,7 +1043,7 @@ def main() -> None:
     try:
         with startup_session(client, registry):
             _run_standalone(args, trade_call, client_id, access_token, client, live)
-    except RecoveryRequired as exc:
+    except (RecoveryRequired, TradingDayOff) as exc:
         print(f"Trading NOT READY: {exc}", flush=True)
         raise SystemExit(2) from None
 

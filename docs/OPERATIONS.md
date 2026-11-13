@@ -12,6 +12,7 @@ validation are in [implementation progress](./IMPLEMENTATION_PROGRESS.md).
 | [live_trader.py](../live_trader.py) | Main Telegram/manual trading CLI |
 | [trading.py](../trading.py) | Parser, strategy, order lifecycle and standalone CLI |
 | [startup_recovery.py](../startup_recovery.py) | Startup refusal gate and local account ownership |
+| [trading_policy.py](../trading_policy.py) | Friday trade off day in IST; startup and entry enforcement |
 | [telegram_trade_listener.py](../telegram_trade_listener.py) | Account session, message assembly and controls |
 | [trade_lifecycle.py](../trade_lifecycle.py) | SQLite trade snapshots and startup audit |
 | [position_sizing.py](../position_sizing.py) | Exact-contract lot metadata and funds sizing |
@@ -196,9 +197,24 @@ activate the checkout environment and run `python live_trader.py`. The engine
 reads Telegram configuration directly. File/manual broker-backed execution can
 use `--telegram-chat ""` and `--signal-file trade_call.txt`.
 
-Normal broker-backed commands can submit live orders automatically on weekdays
-09:00–15:40 IST, inclusive. Mode is selected once per trade, without a holiday or
-submission-time gate. Outside that window execution is paper but still uses
+Normal broker-backed commands can submit live orders automatically Monday–Thursday
+09:00–15:40 IST, inclusive. Every Friday (00:00–24:00 IST) is a **trade off day**:
+both trading CLIs refuse normal startup, print `WARNING: It's Friday, a trade off
+day (IST). Trading startup and new entries are disabled.`, and exit 2 before
+broker authentication, journal creation or Telegram startup. There is no manual
+override. Explicit `--mock-market`, `--parse-only`, standalone message diagnostics
+and the market-data API remain available.
+
+Each nonmock queued trade is checked again. Every live BUY (market or limit)
+checks the day at submission, including an entry armed on Thursday that crosses
+after Friday midnight. A known pre-dispatch refusal is recorded as
+`SKIPPED_DAY_OFF`, not broker uncertainty, and does not advance the queue.
+An already open position may still submit protective SELL exits; this rule does
+not stop monitoring, auto-liquidate exposure or cancel existing broker orders.
+An older already running version must be handed off separately to activate it.
+
+Mode is otherwise selected once per trade, without a holiday or complete
+submission-time session gate. Outside the normal window execution is paper but still uses
 real auth/quotes. There is no supported `--live` flag; a normal command is not
 an inherently offline or dry-run test.
 
@@ -217,6 +233,7 @@ Telegram/listening messages.
 | `OWNERSHIP_UNAVAILABLE` | Another local owner or lock/storage access problem |
 | Broker read/identity/schema errors | Usable successful account evidence was not obtained |
 | `RECOVERY_STORE_FAILED` | Startup decision cannot be persisted |
+| Friday trade off warning | Friday startup or new entry refused before broker dispatch |
 
 Check the reason; authentication is not the answer to every refusal. Do not
 delete/edit journal or lock files to bypass it. OS ownership releases on death;

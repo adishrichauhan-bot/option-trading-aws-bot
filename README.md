@@ -18,7 +18,8 @@ for Windows and EC2 test commands. The runner uses synthetic broker responses,
 temporary state and production-access guards. Two expected failures remain for
 tick delivery and reconnect behavior.
 
-Normal broker-backed execution selects live orders automatically on weekdays
-09:00–15:40 IST; it is not an offline test command. Startup refuses unresolved
+Normal broker-backed execution selects live orders automatically Monday–Thursday
+09:00–15:40 IST; Friday is a trade off day and trading startup/new entries are
+blocked with a warning. It is not an offline test command. Startup refuses unresolved
 exposure but does not restore or independently protect existing positions after
 a process or host failure.

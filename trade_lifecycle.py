@@ -193,7 +193,7 @@ class TradeRegistry:
                 isinstance(order, dict) and order.get('status') in {'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'}
                 for order in orders
             )
-            skipped = status == 'SKIPPED_SIZING' and not orders and payload.get('remaining_quantity', 0) == 0
+            skipped = status in {'SKIPPED_SIZING', 'SKIPPED_DAY_OFF'} and not orders and payload.get('remaining_quantity', 0) == 0
             if not skipped and not (status == 'CLOSED' and flat and terminal_orders):
                 unresolved.append(trade_id)
         return unresolved

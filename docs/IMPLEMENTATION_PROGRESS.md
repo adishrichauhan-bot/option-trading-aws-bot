@@ -28,6 +28,36 @@ The sections below retain the initial implementation/validation record.
 
 ## Completed in this batch
 
+### Owner policy update: Friday is a trade off day
+
+On 2026-11-13 the owner explicitly made every Friday a trading day off in IST.
+[Trading-day policy](../trading_policy.py) now rejects normal integrated and
+standalone CLI startup on Friday with a clear warning and exit 2, before
+authentication, journal creation or listener startup. There is no override flag.
+Mock simulation, parse-only, market-data and standalone Telegram diagnostic
+commands remain available. Each nonmock queued trade rechecks the day and each
+live BUY rechecks immediately before dispatch, including midnight rollover.
+Known pre-dispatch refusals use SKIPPED_DAY_OFF, not reconciliation uncertainty.
+Protective SELL exits for existing exposure remain permitted; the rule neither
+liquidates positions nor cancels outstanding broker orders automatically.
+
+[Friday regressions](../tests/test_friday_day_off.py) cover full-day and UTC/IST
+boundaries, both CLI guards, offline paths, queued paper fallback, market/limit
+entry, Thursday arming, midnight during logging, queue stop disposition and
+continued protective exits. Existing live-broker fixtures now freeze a permitted
+Monday explicitly, so the suite is independent of its actual execution weekday.
+Local guarded validation: **131 tests, 129 passing, 2 expected failures, no
+unexpected failures/errors/skips and zero guard violations**, Python 3.12.0
+(1.132 seconds reported by unittest). The two market-delivery defects remain.
+
+A read-only EC2 broker check on Friday afternoon reported one open position and
+zero pending orders. The older running process was not interrupted, to preserve
+its existing monitoring. Code synchronized to disk will protect new starts;
+Friday enforcement inside that older process requires a flat-state handoff.
+No live order was submitted, modified or cancelled by this policy update.
+
+The entries below retain the original Phase 1 implementation record.
+
 | Finding | Change | Evidence and limit |
 | --- | --- | --- |
 | TD11 startup containment | Both [integrated CLI](../live_trader.py) and [standalone CLI](../trading.py) authenticate, identify the account, acquire the same OS lock, and inspect broker orders/trades/positions plus legacy journal state before execution. | [Recovery tests](../tests/test_startup_recovery.py): flat/repeated startup, pending/partial/foreign order, long/short foreign position, failed/malformed reads, legacy uncertainty, persistence failure, both CLI boundaries, lock held during execution and released after exception/process death. Refusal prints NOT READY and exits 2. No automatic restoration. |

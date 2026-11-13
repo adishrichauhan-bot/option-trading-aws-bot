@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import live_trader
 from telegram_trade_listener import TradeCallMessage
+from trading_test_clock import use_monday
 
 
 def trade_call(instrument: str) -> TradeCallMessage:
@@ -42,6 +43,7 @@ class FakeListenerThread:
 
 class PersistentLiveTraderTests(unittest.TestCase):
     def setUp(self) -> None:
+        use_monday(self)
         FakeListenerThread.instances.clear()
 
     def test_main_processes_next_call_after_trade_error(self) -> None:

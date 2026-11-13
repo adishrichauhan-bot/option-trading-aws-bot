@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from trade_lifecycle import TradeRegistry
 from startup_recovery import AccountLock, RecoveryRequired, startup_session
+from trading_test_clock import use_monday
 
 
 def flat_client():
@@ -24,6 +25,7 @@ def flat_client():
 
 class StartupRecoveryTests(unittest.TestCase):
     def setUp(self):
+        use_monday(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

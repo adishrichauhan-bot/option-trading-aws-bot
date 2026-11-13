@@ -5,10 +5,12 @@ from unittest.mock import Mock, patch
 
 from market_data_ws import FyersMarketDataSocket
 from trading import BrokerStateError, BreakoutTrader, FyersOrderExecutor, TradeCall
+from trading_test_clock import use_monday
 
 
 class FyersIntegrationAuditTests(unittest.TestCase):
     def setUp(self):
+        use_monday(self)
         for target in ('socket.socket.connect', 'socket.create_connection'):
             guard = patch(target, side_effect=AssertionError('Network forbidden in audit'))
             guard.start()
