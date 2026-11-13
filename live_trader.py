@@ -21,6 +21,7 @@ from position_sizing import FundsSizer, SizingError, contract_spec
 from trading import (
     BreakoutTrader,
     BrokerStateError,
+    CommandRejected,
     TradingAuthenticationError,
     FyersOrderExecutor,
     authenticated_client,
@@ -31,6 +32,7 @@ from trading import (
 )
 from telegram_trade_listener import TradeCallMessage, listen_for_trade_calls
 from trade_lifecycle import TradeCommand, TradeRegistry
+from startup_recovery import RecoveryRequired, startup_session
 
 
 def _positive_int(value: str, label: str) -> int:
@@ -288,15 +290,18 @@ def run_trade(
                     if not _command_applies(event, trade_id, source_message_ids):
                         print(f"Ignoring control command for another trade: {event.raw_text}")
                         continue
-                    if event.action == "MODIFY_ENTRY":
-                        trader.modify_entry(trigger_range=event.trigger_range, buy_above=event.buy_above)
-                        print(f"{trade_id}: entry modified")
-                    elif event.action == "MODIFY_SL" and event.stoploss is not None:
-                        trader.modify_stoploss(event.stoploss)
-                        print(f"{trade_id}: stop-loss modified to {event.stoploss:g}")
-                    elif event.action == "MODIFY_TARGETS" and event.targets is not None:
-                        trader.modify_targets(event.targets)
-                        print(f"{trade_id}: targets modified")
+                    if event.action in {"MODIFY_ENTRY", "MODIFY_SL", "MODIFY_TARGETS"}:
+                        try:
+                            if event.action == "MODIFY_ENTRY":
+                                trader.modify_entry(trigger_range=event.trigger_range, buy_above=event.buy_above)
+                            elif event.action == "MODIFY_SL" and event.stoploss is not None:
+                                trader.modify_stoploss(event.stoploss)
+                            elif event.action == "MODIFY_TARGETS" and event.targets is not None:
+                                trader.modify_targets(event.targets)
+                        except CommandRejected as exc:
+                            print(f"COMMAND REJECTED: {trade_id}: {exc}", flush=True)
+                            continue
+                        print(f"{trade_id}: {event.action} applied")
                     elif event.action == "CANCEL":
                         trader.cancel("Telegram cancellation")
                     elif event.action == "EXIT":
@@ -388,13 +393,29 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=0.05, help="Minimum delay between processed ticks")
     args = parser.parse_args()
 
+    registry = TradeRegistry(
+        os.getenv("TRADE_REGISTRY_PATH", "~/.fyers/trade_lifecycle.sqlite3")
+    )
+    if args.mock_market:
+        _run_engine(args, registry)
+        return
+    try:
+        client = authenticated_client()
+        with startup_session(client, registry):
+            print("Startup reconciliation passed; local account ownership acquired.", flush=True)
+            _run_engine(args, registry)
+    except (RecoveryRequired, TradingAuthenticationError) as exc:
+        print(f"Trading NOT READY: {exc}", flush=True)
+        raise SystemExit(2) from None
+
+
+def _run_engine(args: argparse.Namespace, registry: TradeRegistry) -> None:
+    """Run only within startup ownership, or with an explicit mock market."""
+
     telegram_thread: Thread | None = None
     telegram_stop = Event()
     calls: Queue[TradeCallMessage | TradeCommand | BaseException] | None = None
     pending_signals: list[str] = []
-    registry = TradeRegistry(
-        os.getenv("TRADE_REGISTRY_PATH", "~/.fyers/trade_lifecycle.sqlite3")
-    )
     if args.telegram_chat:
         calls = Queue()
         telegram_thread = Thread(

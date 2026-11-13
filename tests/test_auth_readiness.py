@@ -1,5 +1,6 @@
 import unittest
 import sys
+from contextlib import nullcontext
 from queue import Queue
 from threading import Event
 from unittest.mock import Mock, patch
@@ -93,6 +94,8 @@ class ListenerReadinessTests(unittest.TestCase):
         FakeListenerThread.instances.clear()
         with (patch.object(sys, "argv", ["live_trader.py", "--telegram-chat", "test-chat"]),
               patch.object(live_trader, "Thread", FakeListenerThread),
+              patch.object(live_trader, "authenticated_client", return_value=Mock()),
+              patch.object(live_trader, "startup_session", return_value=nullcontext()),
               patch.object(live_trader, "TradeRegistry") as registry,
               patch.object(live_trader, "run_trade", side_effect=trading.TradingAuthenticationError("login required")) as run):
             registry.return_value.create.return_value = "test-trade"

@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 
 from market_data_ws import FyersMarketDataSocket
 from position_sizing import FundsSizer, SizingError, contract_spec
+from startup_recovery import RecoveryRequired, startup_session
+from trade_lifecycle import TradeRegistry
 
 load_dotenv()
 
@@ -172,6 +174,10 @@ class TradingAuthenticationError(RuntimeError):
     """Do not consume further signals until Fyers authentication is restored."""
 
 
+class CommandRejected(ValueError):
+    """Invalid amendment; preserve the last valid state and keep monitoring."""
+
+
 @dataclass(frozen=True)
 class OrderState:
     order_id: str
@@ -254,7 +260,15 @@ class FyersOrderExecutor:
                       "COMPLETE": "FILLED", "EXECUTED": "FILLED", "CANCELED": "CANCELLED"}.get(status, status)
             if status not in {"FILLED", "CANCELLED", "REJECTED", "EXPIRED", "PENDING", "TRANSIT", "PARTIALLY_FILLED"}:
                 raise ValueError(f"unknown order status: {status}")
-            filled = int(row["filledQty"])
+            raw_filled = row["filledQty"]
+            # JSON integer quantities and legacy digit strings only. int(float)
+            # truncates and int(bool) invents a quantity; neither is a valid fill.
+            if type(raw_filled) is int:
+                filled = raw_filled
+            elif isinstance(raw_filled, str) and re.fullmatch(r"[0-9]+", raw_filled):
+                filled = int(raw_filled)
+            else:
+                raise ValueError("filledQty must be an exact integer")
             if not 0 <= filled <= quantity or (status == "FILLED" and filled != quantity):
                 raise ValueError(f"inconsistent filledQty: {row}")
             state = OrderState(order_id, status, filled)
@@ -669,28 +683,28 @@ class BreakoutTrader:
         buy_above: float | None = None,
     ) -> None:
         if self.entered or self.closed or self.entry_order is not None:
-            raise RuntimeError("entry cannot be modified after the trade has started or closed")
+            raise CommandRejected("entry cannot be modified after the trade has started or closed")
         if trigger_range is None and buy_above is None:
-            raise ValueError("modified entry requires a range or BUY ABOVE price")
+            raise CommandRejected("modified entry requires a range or BUY ABOVE price")
         if trigger_range is not None:
             low, high = trigger_range
             if low > high:
-                raise ValueError("modified trigger range is invalid")
+                raise CommandRejected("modified trigger range is invalid")
         self.trade_call = replace(self.trade_call, trigger_range=trigger_range, buy_above=buy_above)
 
     def modify_stoploss(self, stoploss: float) -> None:
         if not math.isfinite(stoploss) or stoploss <= 0 or (self.entered and stoploss >= self.previous_price):
-            raise ValueError("modified stop-loss is invalid")
+            raise CommandRejected("modified stop-loss is invalid")
         if self.trailing and stoploss < self.active_stoploss:
-            raise ValueError("a trailing stop-loss cannot be lowered")
+            raise CommandRejected("a trailing stop-loss cannot be lowered")
         self.active_stoploss = stoploss
         self.trade_call = replace(self.trade_call, stoploss=stoploss)
 
     def modify_targets(self, targets: tuple[float, ...]) -> None:
         if len(targets) != 3 or not all(first < second for first, second in zip(targets, targets[1:])):
-            raise ValueError("exactly three ascending targets are required")
+            raise CommandRejected("exactly three ascending targets are required")
         if targets[0] <= self.active_stoploss:
-            raise ValueError("first target must be above the active stop-loss")
+            raise CommandRejected("first target must be above the active stop-loss")
         self.trade_call = replace(self.trade_call, targets=targets)  # type: ignore[arg-type]
 
     def _exit_order(self, quantity: int, reason: str, price: float) -> OrderAction | None:
@@ -1008,6 +1022,17 @@ def main() -> None:
     )
     client_id, access_token = authenticated_credentials()
     client = authenticated_client((client_id, access_token))
+    registry = TradeRegistry(os.getenv("TRADE_REGISTRY_PATH", "~/.fyers/trade_lifecycle.sqlite3"))
+    try:
+        with startup_session(client, registry):
+            _run_standalone(args, trade_call, client_id, access_token, client, live)
+    except RecoveryRequired as exc:
+        print(f"Trading NOT READY: {exc}", flush=True)
+        raise SystemExit(2) from None
+
+
+def _run_standalone(args: argparse.Namespace, trade_call: TradeCall,
+                    client_id: str, access_token: str, client: Any, live: bool) -> None:
     symbol = resolve_option_symbol(client, trade_call)
     spec = contract_spec(symbol)
     sizer = FundsSizer(client, spec, rounding=args.sizing_rounding)

@@ -8,9 +8,11 @@ exists. Tokens are stored outside the repository by default at
 from __future__ import annotations
 
 import hashlib
+import getpass
 import json
 import os
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -120,8 +122,7 @@ def extract_auth_code(url: str, expected_state: str) -> str | None:
 
     error = values.get("error", [""])[0]
     if error:
-        description = values.get("description", [error])[0]
-        raise RuntimeError(f"Fyers login failed: {description}")
+        raise RuntimeError("Fyers login failed; retry authentication")
 
     returned_state = values.get("state", [None])[0]
     if returned_state and returned_state != expected_state:
@@ -134,7 +135,13 @@ def manual_auth_code(login_url: str, expected_state: str) -> str:
     """Print the login URL and accept a redirect URL/code in a headless shell."""
     print("Open this Fyers login URL in a browser on your local machine:")
     print(login_url)
-    entered = input("Paste the full redirect URL or auth_code here: ").strip()
+    try:
+        with warnings.catch_warnings():
+            # getpass otherwise falls back to echoed input when no TTY exists.
+            warnings.simplefilter('error', getpass.GetPassWarning)
+            entered = getpass.getpass("Paste the full redirect URL or auth_code here (hidden): ").strip()
+    except getpass.GetPassWarning:
+        raise RuntimeError("Hidden credential input requires an interactive terminal") from None
     if not entered:
         raise RuntimeError("No auth_code or redirect URL was provided")
 
@@ -193,10 +200,13 @@ def access_token_works(client_id: str, access_token: str) -> bool:
 
 
 def exchange_auth_code(app_session: Any, auth_code: str) -> dict[str, str]:
-    app_session.set_token(auth_code)
-    response = app_session.generate_token()
-    if not response_is_ok(response) and "access_token" not in response:
-        raise RuntimeError(f"Fyers authorization-code exchange failed: {response}")
+    try:
+        app_session.set_token(auth_code)
+        response = app_session.generate_token()
+    except Exception:
+        raise RuntimeError("Fyers authorization-code exchange failed") from None
+    if not isinstance(response, dict) or (not response_is_ok(response) and "access_token" not in response):
+        raise RuntimeError("Fyers authorization-code exchange failed")
     tokens = {
         key: str(response[key])
         for key in ("access_token", "refresh_token")
@@ -268,8 +278,8 @@ def main() -> Any:
             write_tokens(cached)
             access_token = refreshed["access_token"]
             print("Access token refreshed successfully.")
-        except Exception as refresh_error:
-            print(f"Refresh unavailable; starting browser login: {refresh_error}")
+        except Exception:
+            print("Refresh unavailable; starting browser login")
             access_token = None
 
     if not access_token:
@@ -283,11 +293,13 @@ def main() -> Any:
         print("Access and refresh tokens generated and cached successfully.")
 
     fyers = build_client(client_id, access_token)
-    profile = fyers.get_profile()
+    try:
+        profile = fyers.get_profile()
+    except Exception:
+        raise RuntimeError("Fyers profile check failed") from None
     if not response_is_ok(profile):
-        raise RuntimeError(f"Fyers profile check failed: {profile}")
+        raise RuntimeError("Fyers profile check failed")
     print("Fyers authentication is ready.")
-    print(profile)
     return fyers
 
 

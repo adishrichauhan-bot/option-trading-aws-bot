@@ -6,7 +6,7 @@ Date: 2026-11-12. Code baseline: `a4aac3a`. **Proposal only. No application rewr
 
 ## Reviewed artifacts and missing information
 
-The review covers eight application modules, thirteen test modules, dependency/configuration templates, Git baseline, supplied messages, [runbook](./startTradeRunbook.md), narrative design and the six audit reports linked below. Existing source remains unchanged.
+The review covers eight application modules, thirteen test modules, dependency/configuration templates, Git baseline, supplied messages, [runbook](../OPERATIONS.md#daily-operation), narrative design and the six audit reports linked below. Existing source remains unchanged.
 
 Available evidence supports concrete code/control-flow findings, not complete historical incident attribution. Still required for a complete audit: approved business rules; original message IDs/revisions/replies and reception times; timestamp-aligned exchange ticks and broker order/execution records; redacted effective deployment settings/runtime versions; service/permission/clock configuration; verified broker protection/correlation capabilities; execution prices/charges and approved accounting method. Do not supply secrets.
 
@@ -16,11 +16,11 @@ Critical clarification questions were sent for buying-range semantics, approved 
 
 | Deliverable | Contents and evidence |
 | --- | --- |
-| A Executive assessment | Section A; [initial audit](./ARCHITECTURE_RELIABILITY_AUDIT.md) |
-| B Requirements gap analysis | Section B; [33-requirement traceability matrix](./FUNCTIONAL_REQUIREMENTS_AUDIT.md) |
-| C Technical defect register | Section C; [16 confirmed findings and 8 hypotheses](./TECHNICAL_DESIGN_CODE_REVIEW.md) |
-| D Failure scenario matrix | Section D; [22-scenario FMEA](./FAILURE_MODE_EFFECTS_ANALYSIS.md) |
-| E Improved system design | Section E; [current architecture review](./SOLUTION_ARCHITECTURE_REVIEW.md), [contracts/invariants](./DATA_OUTPUT_VALIDATION.md) |
+| A Executive assessment | Section A; [initial audit](ARCHITECTURE_RELIABILITY_AUDIT.md) |
+| B Requirements gap analysis | Section B; [33-requirement traceability matrix](FUNCTIONAL_REQUIREMENTS_AUDIT.md) |
+| C Technical defect register | Section C; [16 confirmed findings and 8 hypotheses](TECHNICAL_DESIGN_CODE_REVIEW.md) |
+| D Failure scenario matrix | Section D; [22-scenario FMEA](FAILURE_MODE_EFFECTS_ANALYSIS.md) |
+| E Improved system design | Section E; [current architecture review](SOLUTION_ARCHITECTURE_REVIEW.md), [contracts/invariants](DATA_OUTPUT_VALIDATION.md) |
 | F Implementation roadmap | Section F |
 | G Test plan | Section G |
 
@@ -46,7 +46,7 @@ Retain working mechanisms and repair boundaries incrementally. Neither a wholesa
 | Implementation mismatch | R18 reply routing, R19 cancellation, R22 queue identity | Targeted regression and correction |
 | Not verifiable | Every historical miss; optimal trailing; financial accuracy | Obtain appropriate source evidence/ledger; retain unknown status |
 
-The [matrix](./FUNCTIONAL_REQUIREMENTS_AUDIT.md) maps intent, clarity, edge cases, code, exceptions and measurable acceptance criteria. Blocking policy questions must not be counted as passing tests or silently answered by implementation.
+The [matrix](FUNCTIONAL_REQUIREMENTS_AUDIT.md) maps intent, clarity, edge cases, code, exceptions and measurable acceptance criteria. Blocking policy questions must not be counted as passing tests or silently answered by implementation.
 
 ## C. Defect disposition
 
@@ -58,7 +58,7 @@ The [matrix](./FUNCTIONAL_REQUIREMENTS_AUDIT.md) maps intent, clarity, edge case
 | Local lifecycle/privacy | TD14 API sockets, TD16 auth output | Targeted resource/redaction fixes |
 | Suspected risks | H01 writer race, H02 starvation, H03 blocking transport, H04 token writer race | Execute specified experiments before claiming confirmation |
 
-Full root causes, triggers, severity, evidence and regression specifications are in the [technical register](./TECHNICAL_DESIGN_CODE_REVIEW.md). Confirmed code paths are not necessarily reproduced production failures.
+Full root causes, triggers, severity, evidence and regression specifications are in the [technical register](TECHNICAL_DESIGN_CODE_REVIEW.md). Confirmed code paths are not necessarily reproduced production failures.
 
 ## D. Failure coverage
 
@@ -72,7 +72,7 @@ Full root causes, triggers, severity, evidence and regression specifications are
 | FM19–20 malformed/conflicting | Fill/routing probes and cancel-race tests | X01/X05/X09 |
 | FM21–22 financial/audit gaps | Missing ledger/provenance confirmed | X14/X15 |
 
-The [FMEA](./FAILURE_MODE_EFFECTS_ANALYSIS.md) supplies trigger, impact, detection, containment, recovery and residual risk. Existing tests cover only identified cases, not each entire scenario group.
+The [FMEA](FAILURE_MODE_EFFECTS_ANALYSIS.md) supplies trigger, impact, detection, containment, recovery and residual risk. Existing tests cover only identified cases, not each entire scenario group.
 
 ## E. Improved system design
 
@@ -162,7 +162,7 @@ flowchart LR
  A --> R
 ```
 
-Adopt the versioned contracts and DI01–DI20 in [data validation](./DATA_OUTPUT_VALIDATION.md). Require stable account/source/signal/intent/event IDs, source references, config/rule/build versions and explicit source/receipt/recorded times. Strict integers reject booleans/fractions; monetary/tick representation must be explicit. ACK, decision LTP, requested limit and execution price are distinct fields. Missing values remain unknown, not zero.
+Adopt the versioned contracts and DI01–DI20 in [data validation](DATA_OUTPUT_VALIDATION.md). Require stable account/source/signal/intent/event IDs, source references, config/rule/build versions and explicit source/receipt/recorded times. Strict integers reject booleans/fractions; monetary/tick representation must be explicit. ACK, decision LTP, requested limit and execution price are distinct fields. Missing values remain unknown, not zero.
 
 SQLite can support the initial single-writer design with migrations and tested backup/restore. Legacy snapshots remain historical evidence; do not manufacture event histories or auto-restore unsupported old positions. Manual/reentry/queued paths use the same lifecycle contracts. Raw secrets never enter the audit ledger.
 

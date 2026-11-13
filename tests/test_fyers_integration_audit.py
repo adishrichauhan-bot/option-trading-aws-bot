@@ -85,7 +85,6 @@ class FyersIntegrationAuditTests(unittest.TestCase):
             trader.poll_orders()
         self.assertEqual(trader.remaining_quantity, 30)
 
-    @unittest.expectedFailure
     def test_fy03_fractional_fill_must_be_rejected(self):
         self.observation(6, 1.9)
         with self.assertRaises(BrokerStateError):

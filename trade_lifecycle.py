@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -177,3 +177,39 @@ class TradeRegistry:
         with self._connection() as connection:
             row = connection.execute("SELECT status, payload FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
         return None if row is None else (row[0], json.loads(row[1]))
+
+    def unresolved_trade_ids(self) -> list[str]:
+        """Legacy snapshots are evidence, never a source for invented restoration."""
+        unresolved = []
+        with self._lock, self._connection() as connection:
+            rows = connection.execute('SELECT trade_id, status, payload FROM trades').fetchall()
+        for trade_id, status, raw in rows:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError('Invalid journal snapshot')
+            orders = payload.get('orders', [])
+            flat = type(payload.get('remaining_quantity')) is int and payload['remaining_quantity'] == 0
+            terminal_orders = isinstance(orders, list) and all(
+                isinstance(order, dict) and order.get('status') in {'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'}
+                for order in orders
+            )
+            skipped = status == 'SKIPPED_SIZING' and not orders and payload.get('remaining_quantity', 0) == 0
+            if not skipped and not (status == 'CLOSED' and flat and terminal_orders):
+                unresolved.append(trade_id)
+        return unresolved
+
+    def record_startup(self, account_key: str, outcome: str, reason: str, observations: dict) -> None:
+        """Additive v1 audit table; never alters trades or guesses legacy history."""
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                'CREATE TABLE IF NOT EXISTS startup_recovery_v1 ('
+                'run_id INTEGER PRIMARY KEY, account_key TEXT NOT NULL, '
+                'outcome TEXT NOT NULL, reason TEXT NOT NULL, '
+                'observations TEXT NOT NULL, recorded_at TEXT NOT NULL)'
+            )
+            connection.execute(
+                'INSERT INTO startup_recovery_v1 (account_key,outcome,reason,observations,recorded_at) '
+                'VALUES (?,?,?,?,?)',
+                (account_key, outcome, reason, json.dumps(observations, allow_nan=False),
+                 datetime.now(timezone.utc).isoformat()),
+            )

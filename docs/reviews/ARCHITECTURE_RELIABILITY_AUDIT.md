@@ -15,11 +15,11 @@ No application code, existing tests, configuration, broker state or server proce
 
 | Requested artifact | Available evidence | Limitation |
 | --- | --- | --- |
-| Requirements/business rules | Supplied conversation, [HANDOFF](./HANDOFF.md), [RUNNING](./RUNNING.md), [preparation](./preparation.md), [runbook](./startTradeRunbook.md) | No approved, versioned acceptance specification; documents contradict themselves. Complete older conversation bodies are not available. |
+| Requirements/business rules | Supplied conversation, [HANDOFF](../history/HANDOFF.md), [RUNNING](../OPERATIONS.md#strategy-and-order-behavior), [preparation](../OPERATIONS.md#installation-and-configuration), [runbook](../OPERATIONS.md#daily-operation) | No approved, versioned acceptance specification; documents contradict themselves. Complete older conversation bodies are not available. |
 | Architecture/detailed design | Eight application modules and narrative documentation | No authoritative component contracts, failure model, transition specification or architecture decision records. Architecture below is reconstructed from code. |
-| Source/configuration | All eight top-level Python modules, 13 test modules, [dependencies](./requirements.txt), [environment template](./.env.example), [ignore rules](./.gitignore), Git history | Secret configuration deliberately not dumped. No reproducible lockfile or CI configuration found in the tracked project inventory. |
+| Source/configuration | All eight top-level Python modules, 13 test modules, [dependencies](../../requirements.txt), [environment template](../../.env.example), [ignore rules](../../.gitignore), Git history | Secret configuration deliberately not dumped. No reproducible lockfile or CI configuration found in the tracked project inventory. |
 | API specifications | Official Fyers order lookup, status/fill, funds and symbol-master documentation checked during audit | No exhaustive SDK/network conformance test, exchange capability certification or measured rate-limit behavior. |
-| Database/state | [TradeRegistry](./trade_lifecycle.py), lifecycle snapshots and tests | No production database copied or newly queried here; no migration, event ledger or recovery specification found. |
+| Database/state | [TradeRegistry](../../trade_lifecycle.py), lifecycle snapshots and tests | No production database copied or newly queried here; no migration, event ledger or recovery specification found. |
 | Sample I/O | User's Nov-11/12 messages, replay fixtures, mocked order responses, mock price sequences | Synthetic prices are not historical exchange ticks; pasted messages omit some original IDs/reply relationships and delivery timing. |
 | Logs/errors | Prior investigation results in conversation and documentation | No fresh EC2 log collection in this audit; no complete timestamp-aligned raw Telegram/tick/order trace to establish all historical causes. |
 | Tests/results | Existing suite executed locally: **85 tests, all passing**, 0.382 seconds reported by unittest | Not proof of EC2 runtime parity today, live fills, concurrency safety, latency, fault tolerance, coverage percentage or profitability. |
@@ -40,15 +40,15 @@ The principal flow is Telegram user-session ingestion -> mutable multi-message a
 
 | Module | Current responsibility |
 | --- | --- |
-| [telegram_trade_listener.py](./telegram_trade_listener.py) | Telethon events and two-second polling, text normalization, assembly, command emission, process-local deduplication |
-| [live_trader.py](./live_trader.py) | Thread orchestration, active-trade selection, command routing, sizing setup, live/paper selection, journaling and failure handling |
-| [trading.py](./trading.py) | Second parser, contract resolution, ATR, strategy, order adapter, broker-state reconciliation within one run, standalone CLI |
-| [position_sizing.py](./position_sizing.py) | Exact-symbol lot lookup, Decimal cash sizing, reserve and quantity cap |
-| [market_data_ws.py](./market_data_ws.py) | Fyers socket callbacks, latest-message cache, update waiters, deterministic mock |
-| [trade_lifecycle.py](./trade_lifecycle.py) | Command parser, trade IDs, one SQLite table storing mutable JSON payloads |
-| [auth.py](./auth.py) | Interactive authorization, cached credentials, profile validation and optional refresh |
-| [app.py](./app.py) | Separate FastAPI index/ATM market-data API; not the engine's readiness or control plane |
-| [tests](./tests) | Parser fixtures, mocked broker transitions, strategy and integration regressions |
+| [telegram_trade_listener.py](../../telegram_trade_listener.py) | Telethon events and two-second polling, text normalization, assembly, command emission, process-local deduplication |
+| [live_trader.py](../../live_trader.py) | Thread orchestration, active-trade selection, command routing, sizing setup, live/paper selection, journaling and failure handling |
+| [trading.py](../../trading.py) | Second parser, contract resolution, ATR, strategy, order adapter, broker-state reconciliation within one run, standalone CLI |
+| [position_sizing.py](../../position_sizing.py) | Exact-symbol lot lookup, Decimal cash sizing, reserve and quantity cap |
+| [market_data_ws.py](../../market_data_ws.py) | Fyers socket callbacks, latest-message cache, update waiters, deterministic mock |
+| [trade_lifecycle.py](../../trade_lifecycle.py) | Command parser, trade IDs, one SQLite table storing mutable JSON payloads |
+| [auth.py](../../auth.py) | Interactive authorization, cached credentials, profile validation and optional refresh |
+| [app.py](../../app.py) | Separate FastAPI index/ATM market-data API; not the engine's readiness or control plane |
+| [tests](../../tests) | Parser fixtures, mocked broker transitions, strategy and integration regressions |
 
 Stack: Python, threads/queues, asyncio, SQLite, Fyers SDK, Telethon, requests, python-dotenv, Playwright for login, FastAPI/Uvicorn for the separate API. Dependencies use broad version ranges. Historical deployment evidence records Windows/Python 3.12 locally and EC2/Python 3.9 under tmux; this audit does not certify a current compatibility matrix.
 
@@ -74,7 +74,7 @@ Severity denotes plausible consequence, not a measured incident frequency. Criti
 
 ### F01 — Critical: no startup reconciliation or exclusive execution ownership
 
-Evidence: [main](./live_trader.py:357) initializes a registry and starts new ingestion; [registry](./trade_lifecycle.py:125) exposes create/update/get but no recovery traversal. Startup does not reconcile existing journal states against broker orders, fills and positions. No account-scoped single-writer lease or process lock exists in this execution path.
+Evidence: [main](../../live_trader.py:357) initializes a registry and starts new ingestion; [registry](../../trade_lifecycle.py:125) exposes create/update/get but no recovery traversal. Startup does not reconcile existing journal states against broker orders, fills and positions. No account-scoped single-writer lease or process lock exists in this execution path.
 
 Consequence: restart loses strategy/position state; a second process can submit independently. A journal row is not proof that exposure is protected. Manual orders in the same account make attribution harder.
 
@@ -82,7 +82,7 @@ Required change: boot in RECOVERING, acquire exclusive account ownership, reconc
 
 ### F02 — Critical: protection disappears with the process or feed
 
-Evidence: [local stop submission](./trading.py:536) occurs only after observed prices; [timeout handling](./live_trader.py:313) loops on TimeoutError without a stale-feed deadline; other exceptions with exposure become BrokerStateError and end the engine. KeyboardInterrupt explicitly leaves broker positions open. [socket close callback](./market_data_ws.py:68) changes a flag but does not establish a protection fallback.
+Evidence: [local stop submission](../../trading.py:536) occurs only after observed prices; [timeout handling](../../live_trader.py:313) loops on TimeoutError without a stale-feed deadline; other exceptions with exposure become BrokerStateError and end the engine. KeyboardInterrupt explicitly leaves broker positions open. [socket close callback](../../market_data_ws.py:68) changes a flag but does not establish a protection fallback.
 
 Consequence: process death, disconnected feed, rejected exits, journal failure or an unrelated listener error can leave a position with no active local stop. Failing closed for NEW entries is not equivalent to protecting EXISTING exposure. The 2% rule is an escalation trigger, not a maximum-loss guarantee.
 
@@ -90,7 +90,7 @@ Required change: separate entry permission from exposure-management health. Eval
 
 ### F03 — High: unread ticks are discarded by the consumer API
 
-Evidence: [wait_for_update](./market_data_ws.py:122) snapshots the current producer sequence on every call and waits for something newer. [_on_message](./market_data_ws.py:49) overwrites one latest-value slot. Ticks arriving during broker I/O, SQLite writes, printing or the loop sleep are not reliably consumed.
+Evidence: [wait_for_update](../../market_data_ws.py:122) snapshots the current producer sequence on every call and waits for something newer. [_on_message](../../market_data_ws.py:49) overwrites one latest-value slot. Ticks arriving during broker I/O, SQLite writes, printing or the loop sleep are not reliably consumed.
 
 Offline reproduction: inject prices 79 and 84 before the next wait; the next wait times out despite two never-consumed messages. This was executed against the real wrapper with a mocked socket.
 
@@ -100,7 +100,7 @@ Required change: explicit consumer cursor and bounded ordered event queue, docum
 
 ### F04 — High: unrelated commands apply to the active trade
 
-Evidence: [_command_applies](./live_trader.py:140) returns true for any command without an explicit internal trade ID, including replies outside the active trade's source IDs.
+Evidence: [_command_applies](../../live_trader.py:140) returns true for any command without an explicit internal trade ID, including replies outside the active trade's source IDs.
 
 Offline reproduction: EXIT replying to message 999 applies to a trade sourced from messages 1, 2, 3. Result: True.
 
@@ -110,7 +110,7 @@ Required change: persistent chat/message/reply-root-to-signal mapping, including
 
 ### F05 — High: cancellation does not invalidate pending assembly
 
-Evidence: [_process_message](./telegram_trade_listener.py:482) emits CANCEL and returns without clearing or invalidating the pending setup; the idle engine ignores control messages without an active trade.
+Evidence: [_process_message](../../telegram_trade_listener.py:482) emits CANCEL and returns without clearing or invalidating the pending setup; the idle engine ignores control messages without an active trade.
 
 Offline reproduction: instrument -> range -> CANCEL -> targets/SL emits both a cancellation command and a completed TradeCallMessage. The cancelled setup can become tradable later.
 
@@ -118,7 +118,7 @@ Required change: persist terminal cancellation at the signal identity level, inc
 
 ### F06 — High: queued calls lose identity and bypass journaling
 
-Evidence: [queue handling](./live_trader.py:275) converts subsequent TradeCallMessage objects to strings; [pending selection](./live_trader.py:413) labels all of them `reentry` with empty source IDs; registry is deliberately omitted for `manual` and `reentry`.
+Evidence: [queue handling](../../live_trader.py:275) converts subsequent TradeCallMessage objects to strings; [pending selection](../../live_trader.py:413) labels all of them `reentry` with empty source IDs; registry is deliberately omitted for `manual` and `reentry`.
 
 Consequence: ordinary queued signals become unjournaled trades, losing source dates, reply links and stable IDs. No TTL prevents a delayed call executing after its original context has expired. Pending work disappears on restart.
 
@@ -126,7 +126,7 @@ Required change: persist typed signal records before queueing; carry immutable I
 
 ### F07 — High: invalid control messages can terminate protection
 
-Evidence: [modify_entry/stoploss/targets](./trading.py:665) raise on invalid changes. [run_trade](./live_trader.py:283) applies them without per-command rejection isolation; its outer exception handler halts monitoring when exposure exists.
+Evidence: [modify_entry/stoploss/targets](../../trading.py:665) raise on invalid changes. [run_trade](../../live_trader.py:283) applies them without per-command rejection isolation; its outer exception handler halts monitoring when exposure exists.
 
 Consequence: a stale MODIFY ENTRY after entry, or invalid stop modification, can stop the whole engine while leaving a position open. A rejected command should not be treated as loss of broker-state integrity.
 
@@ -134,7 +134,7 @@ Required change: pure command validation and explicit CommandRejected events; co
 
 ### F08 — High: durable state is written after external side effects
 
-Evidence: [_place_order](./trading.py:208) submits before a durable order-intent write; [journal](./live_trader.py:236) later stores snapshots. [TradeRegistry.update](./trade_lifecycle.py:164) overwrites JSON rather than appending transitions.
+Evidence: [_place_order](../../trading.py:208) submits before a durable order-intent write; [journal](../../live_trader.py:236) later stores snapshots. [TradeRegistry.update](../../trade_lifecycle.py:164) overwrites JSON rather than appending transitions.
 
 Consequence: a crash between broker acceptance and journal persistence leaves an unattributed order. Snapshots do not provide complete reconstruction of amendments, fill chronology or decisions. Unknown submission is correctly halted in-process, but cannot be resolved automatically after restart.
 
@@ -142,7 +142,7 @@ Required change: transactional durable intent/outbox before submission; stable c
 
 ### F09 — High: live/paper authority is selected once by wall clock
 
-Evidence: [run_trade mode selection](./live_trader.py:197) evaluates [weekday window](./trading.py:340) once when a trade starts and retains executor.live. No exchange holiday/session service or per-entry cutoff exists in this path.
+Evidence: [run_trade mode selection](../../live_trader.py:197) evaluates [weekday window](../../trading.py:340) once when a trade starts and retains executor.live. No exchange holiday/session service or per-entry cutoff exists in this path.
 
 Consequence: a pre-open setup can remain paper after opening; a setup armed inside the window can submit later outside it. Time alone is also surprising authorization for manual CLI usage.
 
@@ -150,7 +150,7 @@ Required change: explicit execution mode, exchange-aware admission checked at su
 
 ### F10 — High: recovery ingestion and revisions are incomplete
 
-Evidence: [_listen](./telegram_trade_listener.py:559) starts at the newest ID; poll fallback fetches only the last 20 messages; seen IDs are memory-only; only NewMessage is registered. One global assembler is shared across event and polling deliveries.
+Evidence: [_listen](../../telegram_trade_listener.py:559) starts at the newest ID; poll fallback fetches only the last 20 messages; seen IDs are memory-only; only NewMessage is registered. One global assembler is shared across event and polling deliveries.
 
 Consequence: startup gaps are intentionally skipped; more than 20 missed messages can exceed fallback recovery; edits are ignored; interleaved setups are not correlated independently. Polling/event delivery order can affect assembly even though retained chunks are sorted.
 
@@ -158,7 +158,7 @@ Required change: durable inbox/cursor, paginated catch-up, revisions, reply-awar
 
 ### F11 — High: contract constraints and risk budget are incomplete
 
-Evidence: [ContractSpec](./position_sizing.py:38) carries only symbol/lot; `contract_spec` treats missing tradeStatus as active. [symbol resolver](./trading.py:950) takes the first matching chain strike/type, otherwise nearest nonexpired fallback. Tick size is an environment default, not per-contract metadata. Funds sizing consumes available cash less reserve (default zero), capped by units, not by stop risk or contract freeze limits.
+Evidence: [ContractSpec](../../position_sizing.py:38) carries only symbol/lot; `contract_spec` treats missing tradeStatus as active. [symbol resolver](../../trading.py:950) takes the first matching chain strike/type, otherwise nearest nonexpired fallback. Tick size is an environment default, not per-contract metadata. Funds sizing consumes available cash less reserve (default zero), capped by units, not by stop risk or contract freeze limits.
 
 Consequence: ambiguity about expiry, incorrect tick increments, oversized broker requests or insufficient cost/slippage buffer can reject orders. Cash affordability is not a portfolio risk limit.
 
@@ -166,7 +166,7 @@ Required change: versioned complete InstrumentSpec, explicit expiry policy, pric
 
 ### F12 — Medium: market-data API leaks socket lifecycle and misstates health
 
-Evidence: [market_data endpoint](./app.py:192) creates FyersMarketData per request; its fetch path subscribes sockets without closing them. [health](./app.py:186) always returns ok and knows nothing about the trading worker.
+Evidence: [market_data endpoint](../../app.py:192) creates FyersMarketData per request; its fetch path subscribes sockets without closing them. [health](../../app.py:186) always returns ok and knows nothing about the trading worker.
 
 Consequence: repeated requests can accumulate socket resources; a green API health response does not prove authenticated ingestion, fresh quotes or managed exposure. Error details also forward arbitrary exception text to clients.
 
@@ -174,7 +174,7 @@ Required change: application-lifespan-managed shared market-data adapter, bounde
 
 ### F13 — Medium: operational and secret-handling controls are incomplete
 
-Evidence: [auth.main](./auth.py:237) prints raw profile and some raw error responses; manual auth input echoes pasted redirect credentials. Token temporary file permissions are restricted only after replacement. [ignore rules](./.gitignore) do not generally exclude session files, PEM files, token JSON or SQLite journals. No committed service supervision/alerting/CI definitions were found. Dependencies are ranges without a lock. Documentation retains obsolete real-quantity flags, T3-exit instructions and conflicting sizing defaults.
+Evidence: [auth.main](../../auth.py:237) prints raw profile and some raw error responses; manual auth input echoes pasted redirect credentials. Token temporary file permissions are restricted only after replacement. [ignore rules](../../.gitignore) do not generally exclude session files, PEM files, token JSON or SQLite journals. No committed service supervision/alerting/CI definitions were found. Dependencies are ranges without a lock. Documentation retains obsolete real-quantity flags, T3-exit instructions and conflicting sizing defaults.
 
 Consequence: accidental credential/account-data exposure, inconsistent installs, unobserved outages and operator mistakes. This is not a claim that secrets are currently committed or infrastructure controls absent outside the repository.
 

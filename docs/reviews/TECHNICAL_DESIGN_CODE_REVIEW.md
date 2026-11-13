@@ -4,7 +4,7 @@ Date: 2026-11-12. Baseline: `a4aac3a`. Documentation-only deliverable.
 
 ## Scope, evidence and severity
 
-Compared [runbook](./startTradeRunbook.md), [running design notes](./RUNNING.md), [handoff](./HANDOFF.md), [requirements matrix](./FUNCTIONAL_REQUIREMENTS_AUDIT.md) and actual source/test paths. No formal approved detailed design is available; documented implementation choices are not automatically approved business rules.
+Compared [runbook](../OPERATIONS.md#daily-operation), [running design notes](../OPERATIONS.md#strategy-and-order-behavior), [handoff](../history/HANDOFF.md), [requirements matrix](FUNCTIONAL_REQUIREMENTS_AUDIT.md) and actual source/test paths. No formal approved detailed design is available; documented implementation choices are not automatically approved business rules.
 
 Evidence labels: **R** = reproduced offline in this review; **P** = reproduced in the preceding audit; **S** = confirmed by the identified source/control path, not experimentally reproduced here. A confirmed code defect does not establish occurrence or financial impact in production. **H** hypotheses are segregated at the end.
 
@@ -39,7 +39,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD01; evidence P/S.
 2. **Affected requirement:** R07/R08/R13/R15: observation-dependent entry/stop/trailing.
-3. **Module/function:** [wait_for_update](./market_data_ws.py:122), [_on_message](./market_data_ws.py:49).
+3. **Module/function:** [wait_for_update](../../market_data_ws.py:122), [_on_message](../../market_data_ws.py:49).
 4. **Evidence:** wait snapshots `_sequences[symbol]` at each invocation and requires a later sequence. Producer replaces one latest-value slot. Prior probe injected79 and84 before read; next read timed out.
 5. **Root cause:** producer-time baseline is mistaken for last-consumed position; cache is used as an event stream.
 6. **Trigger:** ticks arrive during broker requests, printing, journal writes or sleep; bursts arrive before consumer waits.
@@ -52,7 +52,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD02; evidence R/S.
 2. **Affected requirement:** R08/R28: feed recovery and continued monitoring.
-3. **Module/function:** [_on_error](./market_data_ws.py:59), [_on_connect](./market_data_ws.py:41), [wait_for_update](./market_data_ws.py:122).
+3. **Module/function:** [_on_error](../../market_data_ws.py:59), [_on_connect](../../market_data_ws.py:41), [wait_for_update](../../market_data_ws.py:122).
 4. **Evidence:** new probe called `_on_error('temporary')`, then mocked `_on_connect()`; subsequent wait still raised RuntimeError, with `_error == 'temporary'`.
 5. **Root cause:** error state is latched independently of connection generation and is never cleared by reconnect.
 6. **Trigger:** a recoverable SDK error precedes a reconnect callback.
@@ -65,7 +65,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD03; evidence P/S.
 2. **Affected requirement:** R18/R20/R17.
-3. **Module/function:** [_command_applies](./live_trader.py:139).
+3. **Module/function:** [_command_applies](../../live_trader.py:139).
 4. **Evidence:** every branch without explicit internal trade ID returns True. Prior probe: source IDs1/2/3, EXIT replying999 -> True.
 5. **Root cause:** single-active execution is incorrectly treated as proof that all conversation commands refer to that trade.
 6. **Trigger:** delayed reply to old setup, command for queued setup, multiple setups in channel.
@@ -78,7 +78,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD04; evidence P/S.
 2. **Affected requirement:** R19/R01.
-3. **Module/function:** [_process_message](./telegram_trade_listener.py:482), [idle command handling](./live_trader.py:418).
+3. **Module/function:** [_process_message](../../telegram_trade_listener.py:482), [idle command handling](../../live_trader.py:418).
 4. **Evidence:** CANCEL is emitted and returned without invalidating assembler state; idle main ignores it. Prior probe instrument -> range -> CANCEL -> targets/SL emitted TradeCommand followed by TradeCallMessage.
 5. **Root cause:** cancellation only operates on active execution, not the setup lifecycle.
 6. **Trigger:** provider cancels before final risk chunk or while signal is waiting.
@@ -91,7 +91,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD05; evidence S.
 2. **Affected requirement:** R22/R23/R18.
-3. **Module/function:** [queue drain](./live_trader.py:283), [pending dispatch](./live_trader.py:412).
+3. **Module/function:** [queue drain](../../live_trader.py:283), [pending dispatch](../../live_trader.py:412).
 4. **Evidence:** TradeCallMessage becomes `telegram_call_to_signal(event)` string; later dispatch sets trade_id='reentry', source IDs empty and registry=None.
 5. **Root cause:** operational queue reuses a shorthand reentry mechanism instead of preserving typed signal envelopes.
 6. **Trigger:** any complete new call arrives while another trade is running.
@@ -104,7 +104,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD06; evidence R/S.
 2. **Affected requirement:** R02/R16/R17.
-3. **Module/function:** [modify_entry](./trading.py:665), [initial validation](./trading.py:70).
+3. **Module/function:** [modify_entry](../../trading.py:665), [initial validation](../../trading.py:70).
 4. **Evidence:** probe amended a call with targets102/103/104 to range110–111; accepted state retained those targets and stored buy_above=None. Initial parser would reject targets below entry and normally normalizes buy_above to upper bound. Method validates only low>high for ranges, not complete levels/finite positive values.
 5. **Root cause:** partial dataclass replacement bypasses canonical validation; multi-command update protocol has no explicit draft/commit boundary.
 6. **Trigger:** entry amendment alone, invalid numeric values through direct API, or sequential amendments interrupted between fields.
@@ -117,7 +117,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD07; evidence S.
 2. **Affected requirement:** R16/R17/R28.
-3. **Module/function:** [command dispatch](./live_trader.py:291), [modifiers](./trading.py:665), [outer handler](./live_trader.py:336).
+3. **Module/function:** [command dispatch](../../live_trader.py:291), [modifiers](../../trading.py:665), [outer handler](../../live_trader.py:336).
 4. **Evidence:** MODIFY ENTRY after entry raises RuntimeError; invalid SL raises ValueError. Dispatch has no local rejection handler; outer handler converts exceptions with exposure to BrokerStateError, finally closes stream, and main returns.
 5. **Root cause:** input rejection and exposure-integrity failure share the same exception boundary.
 6. **Trigger:** stale/invalid amendment while position exists, including unrelated command accepted by TD03.
@@ -130,7 +130,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD08; evidence R/S.
 2. **Affected requirement:** R02.
-3. **Module/function:** [Telegram parse](./telegram_trade_listener.py:288), [execution parse](./trading.py:70).
+3. **Module/function:** [Telegram parse](../../telegram_trade_listener.py:288), [execution parse](../../trading.py:70).
 4. **Evidence:** new probes: range100–100/SL90 accepted by Telegram, rejected by execution; range100–105/SL102 rejected by Telegram, accepted by execution (targets110/120/130).
 5. **Root cause:** duplicated validators encode different low/high and SL conditions.
 6. **Trigger:** equal endpoints or SL between range boundaries; different file/manual/Telegram ingress.
@@ -143,7 +143,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD09; evidence R/S; malformed-input robustness defect, not evidence Fyers actually sends fractional fills.
 2. **Affected requirement:** R10/R11.
-3. **Module/function:** [order_state](./trading.py:238).
+3. **Module/function:** [order_state](../../trading.py:238).
 4. **Evidence:** mocked pending response filledQty=1.9 returned filled_quantity=1; code uses int(row['filledQty']). Boolean values are also accepted by Python int conversion.
 5. **Root cause:** coercion precedes validation of numeric type/integrality; bounds check cannot detect truncation.
 6. **Trigger:** malformed SDK/broker fixture or incompatible schema with noninteger numeric fill.
@@ -156,7 +156,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD10; evidence S.
 2. **Affected requirement:** R26.
-3. **Module/function:** [run_trade](./live_trader.py:193), [session window](./trading.py:340), [executor](./trading.py:198).
+3. **Module/function:** [run_trade](../../live_trader.py:193), [session window](../../trading.py:340), [executor](../../trading.py:198).
 4. **Evidence:** live=is_live_trading_window() executes once; executor retains boolean while waiting indefinitely for trigger.
 5. **Root cause:** setup-start eligibility is used as order-time authority.
 6. **Trigger:** setup begins before open and triggers after open, or starts inside window and triggers after cutoff.
@@ -169,7 +169,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD11; evidence S; confirmed missing capability.
 2. **Affected requirement:** R24.
-3. **Module/function:** [main](./live_trader.py:353), [registry API](./trade_lifecycle.py:125).
+3. **Module/function:** [main](../../live_trader.py:353), [registry API](../../trade_lifecycle.py:125).
 4. **Evidence:** startup creates registry and listener but performs no broker orders/trades/positions reconciliation or account executor lock. Registry exposes create/update/get only.
 5. **Root cause:** lifetime of memory state is treated as lifetime of workflow; recovery and ownership were deferred.
 6. **Trigger:** crash/reboot/restart or two independent instances with same broker account.
@@ -182,7 +182,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD12; evidence S.
 2. **Affected requirement:** R23/R24.
-3. **Module/function:** [_place_order](./trading.py:208), [journal](./live_trader.py:240), [registry update](./trade_lifecycle.py:164).
+3. **Module/function:** [_place_order](../../trading.py:208), [journal](../../live_trader.py:240), [registry update](../../trade_lifecycle.py:164).
 4. **Evidence:** remote place_order occurs before tracked order append and subsequent journal; database overwrites a JSON snapshot. No durable pre-submit intent exists. Snapshot does not serialize full strategy state/history.
 5. **Root cause:** observability snapshot is used where a durable workflow protocol is required.
 6. **Trigger:** process/storage failure between broker acceptance and journal; command/fill transitions overwritten by later updates.
@@ -195,7 +195,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD13; evidence S.
 2. **Affected requirement:** R08/R15/R28.
-3. **Module/function:** [timeout branch](./live_trader.py:317), [local stop](./trading.py:536), [socket close](./market_data_ws.py:68).
+3. **Module/function:** [timeout branch](../../live_trader.py:317), [local stop](../../trading.py:536), [socket close](../../market_data_ws.py:68).
 4. **Evidence:** TimeoutError simply continues; local stop decision requires on_price; close callback only updates connected flag/prints. Order polling continues but does not replace absent price-based stop decisions.
 5. **Root cause:** transport silence has no freshness deadline or protection-degraded state; local protection depends on fresh feed.
 6. **Trigger:** feed silent/disconnected without fatal callback while exposure remains.
@@ -208,7 +208,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD14; evidence S.
 2. **Affected requirement:** R31.
-3. **Module/function:** [market_data](./app.py:192), [FyersMarketData.fetch](./app.py:132).
+3. **Module/function:** [market_data](../../app.py:192), [FyersMarketData.fetch](../../app.py:132).
 4. **Evidence:** each request constructs FyersMarketData/socket, subscribes during fetch, and returns or raises without stream.close/finally or application lifecycle ownership.
 5. **Root cause:** long-lived resource is created in request scope without a release contract.
 6. **Trigger:** repeated requests or exceptions after subscription starts.
@@ -221,7 +221,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD15; evidence S.
 2. **Affected requirement:** R01/R27.
-3. **Module/function:** [_listen](./telegram_trade_listener.py:559).
+3. **Module/function:** [_listen](../../telegram_trade_listener.py:559).
 4. **Evidence:** get_messages(limit=20) then latest_id advanced while iterating newest batch; no pagination from prior cursor. Only NewMessage handler; seen IDs and baseline are memory-only.
 5. **Root cause:** bounded recent sample is treated as complete gap recovery; source revision/checkpoint protocol absent.
 6. **Trigger:** event delivery unavailable/delayed for more than20 new messages and polling fallback used.
@@ -234,7 +234,7 @@ Some differences are policy ambiguities, not confirmed bugs: floor versus origin
 
 1. **Finding ID:** TD16; evidence S.
 2. **Affected requirement:** R25/R28 and documented credential privacy constraints.
-3. **Module/function:** [manual_auth_code](./auth.py:133), [main](./auth.py:237), [refresh_access_token](./auth.py:210).
+3. **Module/function:** [manual_auth_code](../../auth.py:133), [main](../../auth.py:237), [refresh_access_token](../../auth.py:210).
 4. **Evidence:** input() echoes full pasted redirect/code; main prints raw profile and refresh exception; refresh exception can embed full response. Noninteractive trading refresh has explicit redaction, showing inconsistent paths.
 5. **Root cause:** interactive convenience output is outside the redaction boundary.
 6. **Trigger:** manual login in retained/shared terminal scrollback, or error response containing sensitive fields.
@@ -255,16 +255,16 @@ These used existing test helpers, mocked socket/client and paper executor, impor
 | TD08a | Range100–100, SL90, targets110/120/130 | Telegram accepts; trading parser rejects |
 | TD08b | Range100–105, SL102, targets110/120/130 | Telegram rejects; trading parser accepts |
 
-TD01/TD03/TD04 offline reproductions are recorded in the [earlier audit](./ARCHITECTURE_RELIABILITY_AUDIT.md). They were not repeated in this section. No captured production logs are claimed as fresh evidence here.
+TD01/TD03/TD04 offline reproductions are recorded in the [earlier audit](ARCHITECTURE_RELIABILITY_AUDIT.md). They were not repeated in this section. No captured production logs are claimed as fresh evidence here.
 
 ## Hypotheses and unresolved risks — not confirmed production defects
 
 | ID | Hypothesis / source concern | What is known versus unproven | Verification needed |
 | --- | --- | --- | --- |
-| H01 | Cross-instance registry races / logical lost updates | [create/update](./trade_lifecycle.py:148) use instance-local locks and select/merge/write; primary key prevents duplicate stored IDs, not broker activity. Exact concurrent outcomes not executed. | Two-connection/process barrier test; verify transaction semantics, conflict/error behavior and retry policy. |
+| H01 | Cross-instance registry races / logical lost updates | [create/update](../../trade_lifecycle.py:148) use instance-local locks and select/merge/write; primary key prevents duplicate stored IDs, not broker activity. Exact concurrent outcomes not executed. | Two-connection/process barrier test; verify transaction semantics, conflict/error behavior and retry policy. |
 | H02 | Backlog starves market evaluation | Unbounded queue drained before ticks; sustained arrival can delay consumer. No load/latency measurement. | Deterministic producer flood with injected clock and broker latency; measure stop-decision delay under bounded workload. |
 | H03 | SDK transport blocks beyond acceptable protection latency | Synchronous calls share trade loop; SDK internal timeouts/retries not comprehensively inspected. | Inspect pinned SDK transport, timeout injection and measured deadlines; do not assume there are no SDK timeouts. |
-| H04 | Token-cache writer race or permission exposure | Fixed .tmp path and chmod after replace visible in [write_tokens](./auth.py:90); actual concurrent writes and OS permissions not tested. | Concurrent writers and restrictive-permission tests on supported OS; inspect umask/ACL without disclosing secrets. |
+| H04 | Token-cache writer race or permission exposure | Fixed .tmp path and chmod after replace visible in [write_tokens](../../auth.py:90); actual concurrent writes and OS permissions not tested. | Concurrent writers and restrictive-permission tests on supported OS; inspect umask/ACL without disclosing secrets. |
 | H05 | Duplicate target milestone behavior after target amendments | targets_hit/target_exits_sent indices remain while levels change; intended re-book/reset behavior unspecified. | Resolve Q14, then model-based transition tests. Do not invent target-reset policy. |
 | H06 | Tick rounding violates intended entry buffer cap | Code caps raw buffer then rounds up; whether cap applies post-round is unspecified. | Resolve Q08 and add boundary fixtures; arithmetic is visible, policy violation not yet established. |
 | H07 | Exact symbol/expiry/freeze constraints produce rejected orders | Resolver metadata/constraints incomplete, but current instrument rejection not proven by a new broker trace. | Redacted production request/response fixture and approved expiry/limit rules; no live diagnostic orders. |
@@ -281,7 +281,7 @@ TD01/TD03/TD04 offline reproductions are recorded in the [earlier audit](./ARCHI
 | Resource leaks | TD14; production growth unmeasured |
 | Invalid transitions / duplicate processing | TD04/TD06/TD11/TD12; revision/restart dedup incomplete in TD15 |
 | Data corruption risks | TD09 exposure accounting, TD12 lost durable intent; H01/H04 logical write conflicts. No evidence of physical database corruption. |
-| Missing validation / configuration | TD06/TD08/TD09/TD10; import-time environment coupling noted in [architecture review](./SOLUTION_ARCHITECTURE_REVIEW.md). Actual secret configuration deliberately not printed. |
+| Missing validation / configuration | TD06/TD08/TD09/TD10; import-time environment coupling noted in [architecture review](SOLUTION_ARCHITECTURE_REVIEW.md). Actual secret configuration deliberately not printed. |
 | Restart/recovery | TD11/TD12/TD13 |
 
 ## Correction order and verification gate

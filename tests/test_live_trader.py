@@ -1,7 +1,7 @@
 import sys
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, nullcontext
 from io import StringIO
 from unittest.mock import Mock, patch
 
@@ -52,6 +52,8 @@ class PersistentLiveTraderTests(unittest.TestCase):
             patch.object(sys, "argv", args),
             patch.object(live_trader, "Thread", FakeListenerThread),
             patch.object(live_trader, "run_trade", run_trade),
+            patch.object(live_trader, "authenticated_client", return_value=Mock()),
+            patch.object(live_trader, "startup_session", return_value=nullcontext()),
         ):
             live_trader.main()
 

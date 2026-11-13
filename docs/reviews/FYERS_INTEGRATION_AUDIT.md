@@ -4,7 +4,7 @@ Baseline: `a4aac3a`; reviewed 2026-11-12. Application code unchanged. This techn
 
 ## 1. Exact local integration inventory
 
-Local installed distribution: **fyers_apiv3 3.2.1**, verified from `.venv/Lib/site-packages/fyers_apiv3-3.2.1.dist-info/METADATA`. [requirements](./requirements.txt) permits `>=3.1,<4`; it does not pin this version. EC2 version was not inspected in this audit and must not be inferred from local installation. Package metadata pins requests2.31.0, aiohttp3.9.3 and websocket-client1.6.1 among other dependencies; installed transitive compatibility was not fully certified.
+Local installed distribution: **fyers_apiv3 3.2.1**, verified from `.venv/Lib/site-packages/fyers_apiv3-3.2.1.dist-info/METADATA`. [requirements](../../requirements.txt) permits `>=3.1,<4`; it does not pin this version. EC2 version was not inspected in this audit and must not be inferred from local installation. Package metadata pins requests2.31.0, aiohttp3.9.3 and websocket-client1.6.1 among other dependencies; installed transitive compatibility was not fully certified.
 
 Endpoint values below are inspected in installed SDK `fyersModel.Config` and method bodies, not guessed from names. Base REST: `https://api-t1.fyers.in/api/v3`; data: `https://api-t1.fyers.in/data`.
 
@@ -41,11 +41,11 @@ Specific guessed URLs for detailed SymbolUpdate and refresh documentation were i
 
 ## 3. Authentication and transport behavior
 
-[auth](./auth.py:35) checks environment token then cache, validates with profile, optionally refreshes with secret/PIN/refresh token, validates refresh and atomically replaces cache. Interactive CLI obtains authorization code through browser or echoed manual input. State is checked only if returned; expected state comes from configuration, not a per-login random value. Redirect origin/state enforcement merits hardening; no exploit is asserted here.
+[auth](../../auth.py:35) checks environment token then cache, validates with profile, optionally refreshes with secret/PIN/refresh token, validates refresh and atomically replaces cache. Interactive CLI obtains authorization code through browser or echoed manual input. State is checked only if returned; expected state comes from configuration, not a per-login random value. Redirect origin/state enforcement merits hardening; no exploit is asserted here.
 
 Installed SDK synchronous `FyersService.post_call/get_call/delete_call` invokes requests.Session methods without an explicit timeout. SessionModel.generate_token also omits timeout. These differ from application refresh/master requests with explicit timeouts. SDK catches many exceptions and can return an error-shaped result, so applications must consider both raised transport errors and returned error envelopes. Inspecting these bodies confirms an unbounded-call design risk; an actual production hang was not measured.
 
-[executor](./trading.py:208) halts on uncertain submit. It does not retry blindly: good containment. But an SDK error response is labelled “rejected” even where a transport-level outcome may be unknown; no durable intent exists to resolve it after termination. Poll/cancel failure can stop active protection. poll_interval is a cache interval, not a network deadline or rate-limit budget.
+[executor](../../trading.py:208) halts on uncertain submit. It does not retry blindly: good containment. But an SDK error response is labelled “rejected” even where a transport-level outcome may be unknown; no durable intent exists to resolve it after termination. Poll/cancel failure can stop active protection. poll_interval is a cache interval, not a network deadline or rate-limit budget.
 
 ## 4. Python execution and synchronization
 
@@ -65,7 +65,7 @@ Repeated cumulative fills are idempotent within a run; partial exposure is recor
 
 REST snapshots, future socket observations and executions must have separate decoders with common normalized IDs, observation times and cumulative/execution semantics. A newer arrival need not be newer broker truth. Merge cannot double-count a socket execution and REST cumulative change. Until a merge contract exists, adding an order socket alone does not improve accounting safety.
 
-[journal](./live_trader.py:240) persists selected last-state fields after external effects. Queued/manual/reentry paths omit it; source revisions, full ATR/trailing history, executed prices/charges and intent chronology are incomplete. Startup does not load/reconcile prior nonterminal trades against orders/trades/positions. Thus internal state cannot be completely reconstructed from current persistence. Broker net positions alone cannot distinguish bot versus manual ownership.
+[journal](../../live_trader.py:240) persists selected last-state fields after external effects. Queued/manual/reentry paths omit it; source revisions, full ATR/trailing history, executed prices/charges and intent chronology are incomplete. Startup does not load/reconcile prior nonterminal trades against orders/trades/positions. Thus internal state cannot be completely reconstructed from current persistence. Broker net positions alone cannot distinguish bot versus manual ownership.
 
 No P&L report engine exists. ACTION prices are decision/request context, not confirmed execution prices; estimated premium is not realized cost. Financial correctness remains unverified until execution/charge attribution and accounting policy exist.
 
@@ -105,7 +105,7 @@ Planned executable cases: pending ACK versus fill, duplicate cumulative observat
 
 ### Executed results
 
-Added [executable audit tests](./tests/test_fyers_integration_audit.py). Focused run: **8 tests, 5 passed, 3 expected failures**. Full suite: **93 tests, 90 passed, 3 expected failures**, no unexpected failures (0.419 seconds reported). Editor diagnostics reported no errors in the added module. Application source and existing tests were not modified.
+Added [executable audit tests](../../tests/test_fyers_integration_audit.py). Focused run: **8 tests, 5 passed, 3 expected failures**. Full suite: **93 tests, 90 passed, 3 expected failures**, no unexpected failures (0.419 seconds reported). Editor diagnostics reported no errors in the added module. Application source and existing tests were not modified.
 
 The three expected failures reproduce desired-but-unmet behavior FY01 unread tick delivery, FY02 reconnect recovery and FY03 fractional-fill rejection. They are explicitly unresolved defects, not successful validation. Remove their expectedFailure markers when implementing fixes; unexpected successes cause unittest failure and demand review.
 

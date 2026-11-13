@@ -129,6 +129,9 @@ class FyersMarketData:
         )
         self.stream = FyersMarketDataSocket(client_id, access_token)
 
+    def close(self) -> None:
+        self.stream.close()
+
     def fetch(self, names: list[str], strike_count: int) -> dict[str, Any]:
         output: dict[str, Any] = {
             "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -203,7 +206,16 @@ def market_data(
             status_code=500,
             detail="Run auth.py first or provide FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN",
         )
+    adapter = None
     try:
-        return FyersMarketData(client_id, access_token).fetch(names, strike_count)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Fyers market-data request failed: {exc}") from exc
+        adapter = FyersMarketData(client_id, access_token)
+        return adapter.fetch(names, strike_count)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Fyers market-data request failed") from None
+    finally:
+        if adapter is not None:
+            try:
+                adapter.close()
+            except Exception:
+                # Do not mask the primary result or print SDK exception contents.
+                print("Market-data stream cleanup failed", flush=True)

@@ -1,5 +1,10 @@
 # Option Trading AWS Bot — Development Handoff
 
+> Historical snapshot: incident evidence and test counts below describe their
+> stated dates. Use the [operating guide](../OPERATIONS.md) for current commands
+> and [implementation progress](../IMPLEMENTATION_PROGRESS.md) for delivered fixes.
+> Earlier next-task notes and document inventories are retained as history.
+
 Last reviewed: 2026-11-10 (Asia/Calcutta)
 
 ## Afternoon missed-trade fix — floor sizing now supersedes ceiling defaults
@@ -19,7 +24,7 @@ No historical calls are submitted to production to make up missed trades.
 
 ## Automatic sizing implementation
 
-[position_sizing.py](./position_sizing.py) now obtains the exact contract's
+[position_sizing.py](../../position_sizing.py) now obtains the exact contract's
 `minLotSize` from the Fyers symbol master and reads fresh Available Balance
 at the breakout. Real trades ignore FYERS_LOT_SIZE/FYERS_QUANTITY; explicit
 quantity/lot-size options are mock-only. Both entry points size against the
@@ -91,7 +96,7 @@ target/SL updates remain supported when no call is being assembled. Target
 modification parsing stops at the next field label and requires three prices,
 so SL cannot become a fourth target.
 
-[Routing regression tests](./tests/test_telegram_message_routing.py) cover the
+[Routing regression tests](../../tests/test_telegram_message_routing.py) cover the
 server chunk, split targets/SL, a complete single-message call, explicit updates,
 standalone updates, and duplicate delivery. Seven tests failed before the fix;
 all eight passed afterwards. Full suite: 47 tests passed on local Python 3.12.
@@ -100,7 +105,7 @@ This fix does not replay missed signals or restart/deploy the server.
 ## Implementation update — 2026-11-10
 
 This update supersedes older descriptions below of T3 liquidation and missing
-order confirmation. See [current execution details](./RUNNING.md#current-trading-behavior-2026-11-10).
+order confirmation. See [current execution details](../OPERATIONS.md#strategy-and-order-behavior).
 
 - Implemented T3 runner: retain the remainder after T1/T2, start SL at T3, then
   ratchet on new highs using the larger of a 3% gap or 2x one-minute ATR. Both
@@ -116,9 +121,9 @@ order confirmation. See [current execution details](./RUNNING.md#current-trading
 - Registered Telegram trades journal order IDs/status/fills and remaining size.
   Re-entry waits for confirmed closure; uncertain broker exposure stops the
   listener from advancing to another trade.
-- Added [broker lifecycle tests](./tests/test_order_lifecycle.py),
-  [trailing tests](./tests/test_trailing_runner.py), and
-  [live-loop integration tests](./tests/test_live_order_integration.py).
+- Added [broker lifecycle tests](../../tests/test_order_lifecycle.py),
+  [trailing tests](../../tests/test_trailing_runner.py), and
+  [live-loop integration tests](../../tests/test_live_order_integration.py).
   All original test files remain unchanged.
 - Validation: 39 tests passed using Python 3.12 locally; no live orders or live
   broker/Telegram/EC2 validation performed. Python 3.9 runtime validation remains
@@ -182,7 +187,7 @@ The system is deliberately single-trade-at-a-time in the integrated engine. New 
 - `python-dotenv`: `.env` configuration loading.
 - Standard library: `sqlite3`, `threading`, `queue`, `argparse`, `dataclasses`, `unittest`, and related modules.
 
-Declared dependency ranges are in [requirements.txt](./requirements.txt). The installed local environment was observed with: `fastapi 0.162.2`, `fyers-apiv3 3.2.1`, `playwright 1.64.1`, `python-dotenv 1.2.4`, `requests 2.31.0`, `telethon 1.45.0`, `uvicorn 0.54.0`, and `websocket-client 1.6.1`.
+Declared dependency ranges are in [requirements.txt](../../requirements.txt). The installed local environment was observed with: `fastapi 0.162.2`, `fyers-apiv3 3.2.1`, `playwright 1.64.1`, `python-dotenv 1.2.4`, `requests 2.31.0`, `telethon 1.45.0`, `uvicorn 0.54.0`, and `websocket-client 1.6.1`.
 
 The project intentionally does not use Selenium because the preparation notes record a dependency conflict: Fyers requires `websocket-client==1.6.1`, while newer Selenium versions require a newer websocket-client. Playwright is used instead.
 
@@ -190,7 +195,7 @@ The project intentionally does not use Selenium because the preparation notes re
 
 ### Authentication and token handling — completed
 
-Implemented in [auth.py](./auth.py):
+Implemented in [auth.py](../../auth.py):
 
 - Fyers authorization-code flow using the configured redirect URI, client ID, secret, grant type, response type, and state.
 - Browser-based login with Playwright/Chromium when available.
@@ -203,7 +208,7 @@ Implemented in [auth.py](./auth.py):
 
 ### FastAPI market-data MVP — completed, live integration dependent
 
-Implemented in [app.py](./app.py):
+Implemented in [app.py](../../app.py):
 
 - `GET /health` returns `{"status":"ok"}`.
 - `GET /market-data` accepts `indices=NIFTY,SENSEX` and `strike_count` from 1 through 10.
@@ -215,7 +220,7 @@ Implemented in [app.py](./app.py):
 
 ### Thread-safe market-data WebSocket — completed
 
-Implemented in [market_data_ws.py](./market_data_ws.py):
+Implemented in [market_data_ws.py](../../market_data_ws.py):
 
 - Wraps the official Fyers `FyersDataSocket` SymbolUpdate feed.
 - Supports lazy connection on first subscription, dynamic subscriptions, latest-price lookup, first-message waiting, and newer-tick waiting.
@@ -225,7 +230,7 @@ Implemented in [market_data_ws.py](./market_data_ws.py):
 
 ### Trade-call parsing and symbol resolution — completed
 
-Implemented in [trading.py](./trading.py):
+Implemented in [trading.py](../../trading.py):
 
 - Parses shorthand instruments such as `NIFTY 23450 CE`, generic index names, exchange-qualified underlyings, and full Fyers symbols.
 - Accepts `BUY ABOVE` and both `TRIGGER RANGE` and legacy `BUYING RANGE` formats.
@@ -235,7 +240,7 @@ Implemented in [trading.py](./trading.py):
 
 ### Breakout/target/stop-loss strategy — completed, with live-order limitations
 
-Implemented in [trading.py](./trading.py):
+Implemented in [trading.py](../../trading.py):
 
 - Requires positive quantity and quantity divisible by lot size.
 - Does not enter on the first price; it requires an observed upward cross.
@@ -251,7 +256,7 @@ Implemented in [trading.py](./trading.py):
 
 ### Fyers order execution — completed
 
-Implemented in [trading.py](./trading.py):
+Implemented in [trading.py](../../trading.py):
 
 - Builds Fyers market and limit order payloads with configurable product type (`FYERS_PRODUCT_TYPE`, default `INTRADAY`).
 - Prints explicit order lines and JSON payloads.
@@ -260,7 +265,7 @@ Implemented in [trading.py](./trading.py):
 
 ### Telegram listener and message assembly — completed, operationally dependent
 
-Implemented in [telegram_trade_listener.py](./telegram_trade_listener.py):
+Implemented in [telegram_trade_listener.py](../../telegram_trade_listener.py):
 
 - Uses a Telethon user session, not a bot token.
 - Lists dialogs and verifies the authenticated account.
@@ -269,11 +274,11 @@ Implemented in [telegram_trade_listener.py](./telegram_trade_listener.py):
 - Cleans decorative text and parses instrument, entry, three targets, and stop-loss.
 - Emits parsed calls as JSON lines.
 - Supports displaying recent messages and inclusive message-ID ranges.
-- Parses control commands including `MODIFY ENTRY`, `MODIFY SL`, target updates, `CANCEL`, `EXIT`, and `RE ENTRY` through [trade_lifecycle.py](./trade_lifecycle.py).
+- Parses control commands including `MODIFY ENTRY`, `MODIFY SL`, target updates, `CANCEL`, `EXIT`, and `RE ENTRY` through [trade_lifecycle.py](../../trade_lifecycle.py).
 
 ### Persistent integrated engine — completed, with recovery gaps
 
-Implemented in [live_trader.py](./live_trader.py):
+Implemented in [live_trader.py](../../live_trader.py):
 
 - Reads a signal file or waits for Telegram calls.
 - Validates quantity, lot size, and maximum quantity (`FYERS_MAX_QUANTITY`, default 10,000).
@@ -286,7 +291,7 @@ Implemented in [live_trader.py](./live_trader.py):
 
 ### Documentation and operational runbooks — completed but still evolving
 
-Existing operational material is in [RUNNING.md](./RUNNING.md), [preparation.md](./preparation.md), and [startTradeRunbook.md](./startTradeRunbook.md). It covers local setup, EC2 setup, Fyers authentication, Telegram verification, tmux operation, mock testing, live startup, shutdown, and credential safety.
+Existing operational material is in [RUNNING.md](../OPERATIONS.md#strategy-and-order-behavior), [preparation.md](../OPERATIONS.md#installation-and-configuration), and [startTradeRunbook.md](../OPERATIONS.md#daily-operation). It covers local setup, EC2 setup, Fyers authentication, Telegram verification, tmux operation, mock testing, live startup, shutdown, and credential safety.
 
 ## 4. Features currently being developed or only partially complete
 
@@ -301,7 +306,7 @@ No source file contains an explicit in-progress marker. Based on the implementat
 
 ## 5. Pending tasks and known bugs/risks
 
-The following risks are explicitly documented in [preparation.md](./preparation.md) or are directly evident from the current code:
+The following risks are explicitly documented in [preparation.md](../OPERATIONS.md#installation-and-configuration) or are directly evident from the current code:
 
 1. Confirm live limit-order fills and partial fills before treating a trigger-range entry as active.
 2. Reconcile Fyers positions and open orders on startup/restart before accepting another entry.
@@ -311,7 +316,7 @@ The following risks are explicitly documented in [preparation.md](./preparation.
 6. Keep the one-active-trade policy explicit, or design and test concurrency if the product requires it.
 7. Verify Fyers symbol-master parsing against current daily symbol-master formats and expiry semantics before live use.
 8. Add integration tests with mocked Fyers responses for authentication, option-chain resolution, order rejection, fill transitions, and restart reconciliation.
-9. Review the manually edited [startTradeRunbook.md](./startTradeRunbook.md) before committing; it is currently modified in the worktree and was not changed by this handoff.
+9. Review the manually edited [startTradeRunbook.md](../OPERATIONS.md#daily-operation) before committing; it is currently modified in the worktree and was not changed by this handoff.
 10. Treat `.env`, Telegram session files, token caches, PEM keys, and logs containing credentials as private. The current `.gitignore` excludes `.env`, virtual environments, caches, and temporary files, but not every possible credential filename.
 
 ## 6. Important technical decisions and rationale
@@ -391,7 +396,7 @@ python -m playwright install chromium
 python -m pip check
 ```
 
-Copy [.env.example](./.env.example) to `.env` and fill in secrets privately. Never print or commit `.env`.
+Copy [.env.example](../../.env.example) to `.env` and fill in secrets privately. Never print or commit `.env`.
 
 ### API
 
@@ -482,8 +487,8 @@ No live Fyers, live Telegram, broker-fill, EC2, or production-network test was p
 - Do not assume restart safety exists. Check open orders and positions before restarting the live engine.
 - Preserve the current one-active-trade behavior unless concurrency is explicitly designed and tested.
 - Run `python -m pip check` after dependency changes and the complete `unittest` command after code changes.
-- Inspect `git status` before editing. At handoff time, [startTradeRunbook.md](./startTradeRunbook.md) was already modified; that change belongs to the existing worktree and must not be discarded.
-- Keep documentation claims synchronized with code. [README.md](./README.md) is currently only a title; the detailed instructions live in the other Markdown files.
+- Inspect `git status` before editing. At handoff time, [startTradeRunbook.md](../OPERATIONS.md#daily-operation) was already modified; that change belongs to the existing worktree and must not be discarded.
+- Keep documentation claims synchronized with code. [README.md](../../README.md) is currently only a title; the detailed instructions live in the other Markdown files.
 - Do not modify application functionality merely to update this handoff.
 
 ## 12. Exact next development task

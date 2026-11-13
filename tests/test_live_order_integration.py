@@ -1,5 +1,6 @@
 import sys
 import unittest
+from contextlib import nullcontext
 from argparse import Namespace
 from queue import Queue
 from unittest.mock import Mock, patch
@@ -15,7 +16,7 @@ SIGNAL = "NIFTY 25000 CE\nTRIGGER RANGE - 100 - 101\nTARGET - 102, 103, 104\nSL 
 
 
 class LiveOrderIntegrationTests(unittest.TestCase):
-    def run_scripted_trade(self, *, reentry=False, awaiting_levels=False):
+    def run_scripted_trade(self, *, reentry=False, awaiting_levels=False, invalid_amendment=False):
         client = Mock()
         client.funds.return_value = {"s": "ok", "fund_limit": [{"title": "Available Balance", "equityAmount": 10250}]}
         client.place_order.side_effect = lambda order: {"s": "ok", "id": f"O{client.place_order.call_count}"}
@@ -38,6 +39,10 @@ class LiveOrderIntegrationTests(unittest.TestCase):
                 stages.append("entry filled without tick")
                 if reentry:
                     events.put(TradeCommand("REENTRY", trigger_range=(100, 101), awaiting_levels=awaiting_levels))
+                if invalid_amendment:
+                    events.put(TradeCommand('MODIFY_ENTRY', buy_above=110))
+                    events.put(TradeCommand('MODIFY_SL', stoploss=200))
+                    events.put(TradeCommand('MODIFY_TARGETS', targets=(90, 80, 70)))
                 raise TimeoutError()
             if len(stages) == 1 and not reentry:
                 stages.append("stop tick")
@@ -68,6 +73,7 @@ class LiveOrderIntegrationTests(unittest.TestCase):
         self.assertEqual(registry.update.call_args.kwargs["remaining_quantity"], 0)
         self.assertEqual([order["id"] for order in registry.update.call_args.kwargs["orders"]], ["O1", "O2"])
         self.assertEqual(len(pending), int(reentry and not awaiting_levels))
+        self.assertEqual(client.place_order.call_count, 2)
 
     def test_orders_reconcile_during_market_data_timeouts_and_journal_ids(self):
         self.run_scripted_trade()
@@ -78,6 +84,9 @@ class LiveOrderIntegrationTests(unittest.TestCase):
     def test_split_reentry_closes_old_position_without_queuing_old_risk_levels(self):
         self.run_scripted_trade(reentry=True, awaiting_levels=True)
 
+    def test_invalid_amendments_do_not_stop_confirmed_exposure_management(self):
+        self.run_scripted_trade(invalid_amendment=True)
+
     def test_broker_uncertainty_does_not_start_next_queued_trade(self):
         FakeListenerThread.instances.clear()
         run_trade = Mock(side_effect=BrokerStateError("unknown broker exposure"))
@@ -86,6 +95,8 @@ class LiveOrderIntegrationTests(unittest.TestCase):
             patch.object(live_trader, "Thread", FakeListenerThread),
             patch.object(live_trader, "TradeRegistry") as registry_type,
             patch.object(live_trader, "run_trade", run_trade),
+            patch.object(live_trader, "authenticated_client", return_value=Mock()),
+            patch.object(live_trader, "startup_session", return_value=nullcontext()),
         ):
             registry_type.return_value.create.return_value = "test-id"
             live_trader.main()
