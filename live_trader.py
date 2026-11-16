@@ -404,6 +404,8 @@ def main() -> None:
             raise SystemExit(2) from None
 
     registry = TradeRegistry(
+        os.getenv("MOCK_TRADE_REGISTRY_PATH", "~/.fyers/mock_trade_lifecycle.sqlite3")
+        if args.mock_market else
         os.getenv("TRADE_REGISTRY_PATH", "~/.fyers/trade_lifecycle.sqlite3")
     )
     if args.mock_market:
