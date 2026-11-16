@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 import threading
@@ -178,12 +179,21 @@ class TradeRegistry:
             row = connection.execute("SELECT status, payload FROM trades WHERE trade_id = ?", (trade_id,)).fetchone()
         return None if row is None else (row[0], json.loads(row[1]))
 
-    def unresolved_trade_ids(self) -> list[str]:
+    def unresolved_trade_ids(self, account_key: str | None = None) -> list[str]:
         """Legacy snapshots are evidence, never a source for invented restoration."""
         unresolved = []
         with self._lock, self._connection() as connection:
             rows = connection.execute('SELECT trade_id, status, payload FROM trades').fetchall()
+            connection.execute('CREATE TABLE IF NOT EXISTS journal_reconciliation_v1 ('
+                               'account_key TEXT NOT NULL, trade_id TEXT NOT NULL, fingerprint TEXT NOT NULL, '
+                               'note TEXT NOT NULL, recorded_at TEXT NOT NULL)')
+            acknowledged = set(connection.execute(
+                'SELECT trade_id, fingerprint FROM journal_reconciliation_v1 WHERE account_key = ?',
+                (account_key,)).fetchall()) if account_key else set()
         for trade_id, status, raw in rows:
+            fingerprint = hashlib.sha256((status + '\n' + raw).encode()).hexdigest()
+            if (trade_id, fingerprint) in acknowledged:
+                continue
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 raise ValueError('Invalid journal snapshot')
@@ -197,6 +207,24 @@ class TradeRegistry:
             if not skipped and not (status == 'CLOSED' and flat and terminal_orders):
                 unresolved.append(trade_id)
         return unresolved
+
+    def reconcile_legacy_flat(self, account_key: str, note: str) -> None:
+        """Acknowledge exact snapshots after locked broker-flat/operator confirmation.
+
+        Original trade evidence is preserved; any later snapshot change blocks again.
+        Caller must hold startup ownership and have validated all broker reads.
+        """
+        if not note.strip():
+            raise ValueError('An operator reconciliation note is required')
+        ids = set(self.unresolved_trade_ids(account_key))
+        with self._lock, self._connection() as connection:
+            for trade_id, status, raw in connection.execute(
+                    'SELECT trade_id, status, payload FROM trades').fetchall():
+                if trade_id in ids:
+                    fingerprint = hashlib.sha256((status + '\n' + raw).encode()).hexdigest()
+                    connection.execute('INSERT INTO journal_reconciliation_v1 VALUES (?,?,?,?,?)',
+                                       (account_key, trade_id, fingerprint, note,
+                                        datetime.now(timezone.utc).isoformat()))
 
     def record_startup(self, account_key: str, outcome: str, reason: str, observations: dict) -> None:
         """Additive v1 audit table; never alters trades or guesses legacy history."""

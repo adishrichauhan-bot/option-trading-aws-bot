@@ -47,6 +47,35 @@ class StartupRecoveryTests(unittest.TestCase):
             rows = db.execute('SELECT outcome FROM startup_recovery_v1').fetchall()
         self.assertEqual(rows, [('READY',), ('READY',)])
 
+    def test_mock_startup_does_not_touch_live_journal(self):
+        import live_trader
+        live_path = self.root / 'live.sqlite3'
+        mock_path = self.root / 'mock.sqlite3'
+        with (patch.dict(os.environ, {'TRADE_REGISTRY_PATH': str(live_path),
+                                    'MOCK_TRADE_REGISTRY_PATH': str(mock_path)}),
+              patch.object(sys, 'argv', ['live_trader.py', '--mock-market']),
+              patch.object(live_trader, '_run_engine') as engine,
+              patch.object(live_trader, 'authenticated_client') as authenticate):
+            live_trader.main()
+        self.assertFalse(live_path.exists())
+        self.assertTrue(mock_path.exists())
+        self.assertEqual(engine.call_args.args[1].path, str(mock_path))
+        authenticate.assert_not_called()
+
+    def test_read_only_report_preserves_legacy_evidence_and_missing_path(self):
+        from journal_report import report
+        import sqlite3
+        trade_id = self.registry.create({'instrument': 'FAKE'})
+        before = Path(self.registry.path).read_bytes()
+        rows = report(self.registry.path)['trades']
+        self.assertEqual(rows[0]['trade_id'], trade_id)
+        self.assertIsNone(rows[0]['remaining_quantity'])
+        self.assertEqual(Path(self.registry.path).read_bytes(), before)
+        missing = self.root / 'missing.sqlite3'
+        with self.assertRaises(sqlite3.OperationalError):
+            report(missing)
+        self.assertFalse(missing.exists())
+
     def test_pending_partial_and_foreign_orders_refuse_startup(self):
         for status, filled in ((4, 0), (6, 0), (6, 20)):
             with self.subTest(status=status, filled=filled):
@@ -107,6 +136,32 @@ class StartupRecoveryTests(unittest.TestCase):
                 with self.session():
                     self.fail('legacy exposure admitted')
         self.assertEqual(self.registry.get(trade_id), before)
+
+    def test_operator_reconciliation_preserves_rows_and_is_account_and_snapshot_bound(self):
+        trade_id = self.registry.create({})
+        before = self.registry.get(trade_id)
+        with self.session(reconciliation_note='Operator verified legacy trades flat'):
+            pass
+        self.assertEqual(self.registry.get(trade_id), before)
+        with self.session():
+            pass
+        self.client.get_profile.return_value['data']['fy_id'] = 'OTHER123'
+        with self.assertRaisesRegex(RecoveryRequired, 'UNRESOLVED_JOURNAL'):
+            with self.session():
+                pass
+        self.client.get_profile.return_value['data']['fy_id'] = 'TEST123'
+        self.registry.update(trade_id, 'ACTIVE', remaining_quantity=20)
+        with self.assertRaisesRegex(RecoveryRequired, 'UNRESOLVED_JOURNAL'):
+            with self.session():
+                pass
+
+    def test_operator_confirmation_cannot_override_broker_exposure(self):
+        trade_id = self.registry.create({})
+        self.client.positions.return_value['netPositions'] = [{'symbol': 'FAKE', 'netQty': 20}]
+        with self.assertRaisesRegex(RecoveryRequired, 'OPEN_POSITIONS'):
+            with self.session(reconciliation_note='Operator confirmed'):
+                pass
+        self.assertEqual(self.registry.unresolved_trade_ids(), [trade_id])
 
     def test_closed_label_with_exposure_or_nonterminal_order_is_not_proof(self):
         trade_id = self.registry.create({})

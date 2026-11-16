@@ -94,7 +94,8 @@ class StartupPermit:
 
 
 @contextmanager
-def startup_session(client: Any, registry: Any, *, lock_directory: Path | None = None):
+def startup_session(client: Any, registry: Any, *, lock_directory: Path | None = None,
+                    reconciliation_note: str | None = None):
     """Hold ownership through execution; yield only after durable flat decision.
 
     Read snapshots are sequential observations, not an atomic account snapshot.
@@ -141,7 +142,7 @@ def startup_session(client: Any, registry: Any, *, lock_directory: Path | None =
                         _integer(overall.get('count_total')) != len(positions)):
                     raise RecoveryRequired('INCONSISTENT_POSITION_TOTALS')
             try:
-                unresolved = registry.unresolved_trade_ids()
+                unresolved = registry.unresolved_trade_ids(owner.account_key)
             except Exception:
                 raise RecoveryRequired('RECOVERY_STORE_FAILED') from None
             observations.update(order_count=len(orders), trade_count=len(trades),
@@ -150,6 +151,13 @@ def startup_session(client: Any, registry: Any, *, lock_directory: Path | None =
                 raise RecoveryRequired('OPEN_ORDERS')
             if open_positions:
                 raise RecoveryRequired('OPEN_POSITIONS')
+            if unresolved and reconciliation_note is not None:
+                try:
+                    registry.reconcile_legacy_flat(owner.account_key, reconciliation_note)
+                    unresolved = registry.unresolved_trade_ids(owner.account_key)
+                    observations['operator_reconciled_count'] = observations['unresolved_count'] - len(unresolved)
+                except Exception:
+                    raise RecoveryRequired('RECOVERY_STORE_FAILED') from None
             if unresolved:
                 raise RecoveryRequired('UNRESOLVED_JOURNAL')
         except RecoveryRequired as exc:
