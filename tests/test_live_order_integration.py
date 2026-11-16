@@ -13,7 +13,7 @@ from test_live_trader import FakeListenerThread
 from trading_test_clock import use_monday
 
 
-SIGNAL = "NIFTY 25000 CE\nTRIGGER RANGE - 100 - 101\nTARGET - 102, 103, 104\nSL - 98"
+SIGNAL = "NIFTY 25000 CE\nBUY ABOVE - 101\nTARGET - 102, 103, 104\nSL - 98"
 
 
 class LiveOrderIntegrationTests(unittest.TestCase):

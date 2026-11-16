@@ -254,12 +254,28 @@ unresolved exposure and does not restore management of an old position.
 
 ## Strategy and order behavior
 
-- Entry requires previous price at/below trigger followed by a price strictly
-  above it. A first tick above waits for a fresh cross. Range entry uses the upper
-  boundary, not buying anywhere inside the range.
-- BUY ABOVE submits market entry. A range submits a limit at crossing LTP plus
-  `min(max(1, 0.5 * ATR), 0.02 * LTP)`, rounded up to the configured tick. It is
-  not fixed at the range upper bound.
+- BUY ABOVE requires a previous price at/below the trigger followed by a price
+  strictly above it, then submits market entry. A first tick above waits for a
+  fresh cross. This rule does not apply to buying ranges.
+- BUYING RANGE/TRIGGER RANGE is a buy zone: entry can occur on the first eligible
+  quote without crossing the upper boundary. The upper boundary is used only
+  to calculate the maximum entry price:
+  `min(range_high, (T1 + minimum_RR * SL) / (1 + minimum_RR))`, rounded down to
+  the configured tick. `FYERS_ENTRY_MIN_RR` defaults to 1.5. The ask must be
+  at/above range low and above SL; its tick-rounded-up limit must fit at/below the
+  cap. With range 100-110, SL 90 and T1 130, the default cap is 106.
+- Live range entry reads the executable ask from FYERS market depth and checks
+  it again after sizing. Missing/malformed quotes do not fall back to LTP. A
+  slow depth response is refused; the broker's last-trade time is not an ask
+  timestamp. Paper mode uses its simulated tick as the ask. Expensive quotes
+  wait for a return into the eligible zone; there is no buffered breakout buy
+  or adaptive upward repricing.
+- `FYERS_ENTRY_TTL_SECONDS` defaults to 60 seconds from trade setup, covering
+  both waiting and an unfilled range order. Pending range entries cancel their
+  unfilled remainder on expiry, stale price updates (default 5 seconds via
+  `FYERS_ENTRY_MAX_QUOTE_AGE_SECONDS`), SL/T1 invalidation, cancellation, or an
+  invalidating amendment. Cancel confirmation and final fills are reconciled
+  before managing any partial position; an expiry does not liquidate a fill.
 - Exact-symbol `minLotSize` and fresh Available Balance determine whole-lot size
   at entry. Budget is balance minus reserve; floor is default and quantity is
   capped in lots. Explicit ceil skips over-budget results. Fees/slippage and
@@ -334,7 +350,8 @@ separately configured. Stop foreground Uvicorn with `Ctrl+C`.
 
 | Symptom | Check |
 | --- | --- |
-| Entry waits above trigger | `ENTRY WAIT`: no fresh cross observed; channel progress is not a broker tick |
+| BUY ABOVE waits above trigger | `ENTRY WAIT`: no fresh cross observed; channel progress is not a broker tick |
+| Buying-range entry waits | Ask outside calculated zone, unavailable quote, or invalid/expired setup; range high is not a trigger |
 | Sizing skip | Diagnostic funds/lot/reserve/cap/rounding; real manual quantity flags are unsupported |
 | Authentication failure | Validate credentials/refresh; cache presence is insufficient |
 | Wrong Telegram account | Correct private session, dialogs and chat; no empty shell overrides |

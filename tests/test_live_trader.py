@@ -54,9 +54,11 @@ class PersistentLiveTraderTests(unittest.TestCase):
             patch.object(sys, "argv", args),
             patch.object(live_trader, "Thread", FakeListenerThread),
             patch.object(live_trader, "run_trade", run_trade),
+            patch.object(live_trader, "TradeRegistry") as registry_type,
             patch.object(live_trader, "authenticated_client", return_value=Mock()),
             patch.object(live_trader, "startup_session", return_value=nullcontext()),
         ):
+            registry_type.return_value.create.side_effect = ["test-1", "test-2"]
             live_trader.main()
 
         self.assertEqual(run_trade.call_count, 2)
@@ -69,19 +71,19 @@ class PersistentLiveTraderTests(unittest.TestCase):
     def test_run_trade_mock_market_completes_and_returns(self) -> None:
         args = Namespace(
             mock_market=True,
-            mock_prices="100,102,103,104,105",
+            mock_prices="99,102,103,104,105,100",
             quantity=100,
             lot_size=10,
             interval=0,
         )
         signal = "NIFTY 25000 CE\nTRIGGER RANGE - 99 - 101\nTARGET - 102, 103, 104\nSL - 98"
 
-        live_trader.run_trade(args, signal)
+        self.assertTrue(live_trader.run_trade(args, signal))
 
     def test_run_trade_mock_market_stoploss_returns(self) -> None:
         args = Namespace(
             mock_market=True,
-            mock_prices="100,102,101,97",
+            mock_prices="99,100,99,97",
             quantity=100,
             lot_size=10,
             interval=0,

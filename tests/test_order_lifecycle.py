@@ -1,5 +1,4 @@
 import unittest
-from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from trading import BreakoutTrader, BrokerStateError, FyersOrderExecutor
@@ -19,7 +18,9 @@ class BrokerLifecycleTests(unittest.TestCase):
         self.rows = {}
         self.client.orderbook.side_effect = lambda data: {"s": "ok", "orderBook": [self.rows[data["id"]]]}
         self.executor = FyersOrderExecutor(self.client, live=True)
-        self.trader = BreakoutTrader(replace(make_call(), trigger_range=(100, 101)), "NSE:TEST", 100, 10, self.executor)
+        # These cases exercise broker fill/cancel lifecycle independently of
+        # buying-range price eligibility, which has its own quote-based tests.
+        self.trader = BreakoutTrader(make_call(), "NSE:TEST", 100, 10, self.executor)
 
     def state(self, order_id, status, filled):
         self.rows[order_id] = {"id": order_id, "status": status, "filledQty": filled}

@@ -16,6 +16,7 @@ import re
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, replace
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -121,7 +122,7 @@ def parse_trade_call(text: str) -> TradeCall:
         high = float(range_match.group("high"))
         if low >= high:
             raise ValueError("Trigger-range low must be less than high")
-        # The range is crossed when price moves above its upper boundary.
+        # Retain the high for validation/calculations, not as an entry trigger.
         buy_above = high
         trigger_range = (low, high)
     else:
@@ -200,6 +201,7 @@ class TrackedOrder:
     applied_fill: int = 0
     cancel_requested: bool = False
     status: str = "SUBMITTED"
+    limit_price: float | None = None
 
 
 class FyersOrderExecutor:
@@ -212,6 +214,37 @@ class FyersOrderExecutor:
             raise ValueError("FYERS_ORDER_POLL_SECONDS must be nonnegative and finite")
         self._states: dict[str, tuple[float, OrderState]] = {}
         self._submitted_quantities: dict[str, int] = {}
+
+    def entry_quote(self, symbol: str, max_age: float) -> float | None:
+        """Read an executable ask; never substitute LTP for missing depth.
+
+        FYERS ltt is last-trade time, not a book timestamp. Freshness here is
+        bounded on-demand request latency, followed by a second pre-submit read.
+        """
+        started = time.monotonic()
+        try:
+            result = self.client.depth(data={"symbol": symbol, "ohlcv_flag": 0})
+            if not isinstance(result, dict) or result.get("s") != "ok":
+                return None
+            book = result["d"][symbol]
+            levels = book["ask"]
+            if not isinstance(levels, list) or not levels:
+                return None
+            asks = []
+            for level in levels:
+                price, volume = level["price"], level["volume"]
+                if (isinstance(price, bool) or not isinstance(price, (int, float)) or
+                        isinstance(volume, bool) or not isinstance(volume, (int, float)) or
+                        not math.isfinite(price) or not math.isfinite(volume) or price < 0 or volume < 0):
+                    return None
+                if price > 0 and volume > 0:
+                    asks.append(float(price))
+            if not asks or time.monotonic() - started > max_age:
+                return None
+            return min(asks)
+        except Exception:
+            # Read-only failure: remain unentered until a fresh quote or expiry.
+            return None
 
     def _place_order(self, order: dict[str, Any], reason: str) -> Any:
         # Recheck at dispatch: an executor may have been armed on Thursday.
@@ -486,6 +519,18 @@ class BreakoutTrader:
         self.trailing_percent = float(os.getenv("FYERS_TRAILING_PERCENT", "3")) / 100
         self.trailing_atr_multiple = float(os.getenv("FYERS_TRAILING_ATR_MULTIPLE", "2"))
         self.price_tick = float(os.getenv("FYERS_PRICE_TICK", "0.05"))
+        self.entry_min_rr = float(os.getenv("FYERS_ENTRY_MIN_RR", "1.5"))
+        self.entry_ttl = float(os.getenv("FYERS_ENTRY_TTL_SECONDS", "60"))
+        self.entry_quote_age = float(os.getenv("FYERS_ENTRY_MAX_QUOTE_AGE_SECONDS", "5"))
+        if not all(math.isfinite(value) and value > 0 for value in (
+                self.entry_min_rr, self.entry_ttl, self.entry_quote_age)):
+            raise ValueError("Range entry settings must be positive and finite")
+        self.entry_deadline = time.monotonic() + self.entry_ttl
+        self.entry_cap: float | None = None
+        self.entry_stop_reason: str | None = None
+        self._range_next_quote_at = 0.0
+        self.last_quote_at: float | None = None
+        self.last_quote_price: float | None = None
         if not 0 < self.trailing_percent < 1 or not math.isfinite(self.trailing_atr_multiple) or self.trailing_atr_multiple <= 0:
             raise ValueError("Trailing percent must be between 0 and 100; ATR multiple must be positive")
         if not math.isfinite(self.price_tick) or self.price_tick <= 0:
@@ -530,6 +575,7 @@ class BreakoutTrader:
     def poll_orders(self) -> None:
         """Reconcile cumulative fills even when no market-data tick arrives."""
         if not self.confirms_orders:
+            self._maintain_range_entry()
             return
         if self.entry_order is not None:
             order = self.entry_order
@@ -543,6 +589,7 @@ class BreakoutTrader:
                 if not self.entered:
                     self.closed = True
                 print(f"ENTRY {state.order_id}: {state.status}, filled={state.filled_quantity}")
+        self._maintain_range_entry()
         if self.exit_order is not None:
             order = self.exit_order
             state = self._apply_order_state(order)
@@ -623,6 +670,8 @@ class BreakoutTrader:
             return []
         if self.exit_requested:
             return []
+        if not self.entered and self.trade_call.trigger_range is not None:
+            return self._try_range_entry(price)
         if self.previous_price is None:
             if not self.entered:
                 threshold = self.trade_call.trigger_range[1] if self.trade_call.trigger_range else self.trade_call.buy_above
@@ -634,17 +683,10 @@ class BreakoutTrader:
             trigger = self.trade_call.trigger_range
             threshold = trigger[1] if trigger else self.trade_call.buy_above
             if self.previous_price <= threshold < price:
-                if trigger:
-                    buffer = min(max(1.0, 0.5 * (self.atr.value or 0)), price * 0.02)
-                    limit_price = round(math.ceil((price + buffer) / self.price_tick) * self.price_tick, 8)
-                    reason = "trigger range crossed"
-                    self._size_entry(limit_price)
-                    response = self.executor.limit_order(self.symbol, self.quantity, 1, limit_price, reason)
-                else:
-                    limit_price = price
-                    reason = "buy-above crossed"
-                    self._size_entry(price)
-                    response = self.executor.market_order(self.symbol, self.quantity, 1, reason)
+                limit_price = price
+                reason = "buy-above crossed"
+                self._size_entry(price)
+                response = self.executor.market_order(self.symbol, self.quantity, 1, reason)
                 self.entry_order = TrackedOrder(response, self.quantity, 1, reason)
                 self.order_history.append(self.entry_order)
                 if not getattr(self.executor, "live", True):
@@ -671,6 +713,95 @@ class BreakoutTrader:
             if self.exit_order is not None:
                 break
         return actions
+
+    def _entry_tick(self, price: float | Decimal, *, up: bool = False) -> float:
+        tick = Decimal(str(self.price_tick))
+        units = (Decimal(str(price)) / tick).to_integral_value(
+            rounding=ROUND_CEILING if up else ROUND_FLOOR)
+        return float(units * tick)
+
+    def _risk_entry_cap(self) -> float:
+        _, high = self.trade_call.trigger_range
+        rr = Decimal(str(self.entry_min_rr))
+        cap = min(Decimal(str(high)), (Decimal(str(self.trade_call.targets[0])) +
+                  rr * Decimal(str(self.active_stoploss))) / (1 + rr))
+        return self._entry_tick(cap)
+
+    def _maintain_range_entry(self) -> None:
+        if self.closed or self.trade_call.trigger_range is None:
+            return
+        order = self.entry_order
+        if self.entered and order is None:
+            return  # Expiry concerns entry only; keep managing confirmed exposure.
+        self.entry_cap = self._risk_entry_cap()
+        now = time.monotonic()
+        price = self.last_quote_price
+        reason = self.entry_stop_reason
+        if now >= self.entry_deadline:
+            reason = "range entry opportunity expired"
+        elif price is not None and price <= self.active_stoploss:
+            reason = "stop-loss reached before entry completed"
+            if self.entered or order is not None:
+                self.exit_requested = f"stoploss_{self.active_stoploss:g} crossed"
+        elif price is not None and price >= self.trade_call.targets[0]:
+            reason = "first target reached before entry completed"
+        elif self.entry_cap < self.trade_call.trigger_range[0] or self.entry_cap <= self.active_stoploss:
+            reason = "no valid entry price within risk/reward ceiling"
+        elif order is not None and (self.last_quote_at is None or now - self.last_quote_at > self.entry_quote_age):
+            reason = "entry market feed stale"
+        elif order is not None and order.limit_price is not None and order.limit_price > self.entry_cap:
+            reason = "amended risk/reward ceiling below pending entry"
+        if reason:
+            if self.entry_stop_reason is None:
+                print(f"RANGE ENTRY STOP: {reason}", flush=True)
+            self.entry_stop_reason = reason
+            if order is not None:
+                self._cancel_tracked(order)
+            elif not self.entered:
+                self.closed = True
+
+    def _try_range_entry(self, price: float) -> list[OrderAction]:
+        """Enter the buy zone at the ask, with no breakout or repricing step."""
+        self._maintain_range_entry()
+        if self.closed or self.entry_stop_reason is not None:
+            return []
+        live = getattr(self.executor, "live", False)
+        if live and time.monotonic() < self._range_next_quote_at:
+            return []
+        self._range_next_quote_at = time.monotonic() + 1.0
+        quote_reader = getattr(self.executor, "entry_quote", None)
+        ask = quote_reader(self.symbol, self.entry_quote_age) if live and callable(quote_reader) else (None if live else price)
+        low = self.trade_call.trigger_range[0]
+        if ask is None or not low <= ask <= self.entry_cap or ask <= self.active_stoploss:
+            return []
+        limit = self._entry_tick(ask, up=True)
+        if limit > self.entry_cap:
+            return []
+        self._size_entry(limit)
+        self._maintain_range_entry()
+        if self.closed or self.entry_stop_reason is not None:
+            return []
+        # Funds reads can be slow. Revalidate after sizing, keeping this limit
+        # and quantity fixed; never chase a higher ask with stale affordability.
+        if live:
+            ask = quote_reader(self.symbol, self.entry_quote_age)
+            self._maintain_range_entry()
+            if (self.closed or self.entry_stop_reason is not None or ask is None or
+                    not low <= ask <= limit or ask <= self.active_stoploss or
+                    self.last_quote_at is None or time.monotonic() - self.last_quote_at > self.entry_quote_age):
+                return []
+        reason = "buying range eligible ask"
+        response = self.executor.limit_order(self.symbol, self.quantity, 1, limit, reason)
+        if self.confirms_orders:
+            self.entry_order = TrackedOrder(response, self.quantity, 1, reason, limit_price=limit)
+            self.order_history.append(self.entry_order)
+            if not live:
+                self.poll_orders()
+        else:
+            self.entered = True
+            self.remaining_quantity = self.quantity
+        print(f"RANGE ENTRY: ask={ask:g} limit={limit:g} ceiling={self.entry_cap:g} min_RR={self.entry_min_rr:g}", flush=True)
+        return [OrderAction(reason, self.quantity, 1, limit)]
 
     def _size_entry(self, price: float) -> None:
         if self.entry_sizer is not None:
@@ -777,6 +908,8 @@ class BreakoutTrader:
         if not math.isfinite(price) or price <= 0:
             raise ValueError("Price must be positive")
         current_atr = self.atr.update(price, timestamp)
+        self.last_quote_at = time.monotonic()
+        self.last_quote_price = price
         if self.confirms_orders:
             try:
                 return self._on_confirmed_price(price)
@@ -794,6 +927,11 @@ class BreakoutTrader:
         if pending_actions and self.closed:
             self.previous_price = price
             return pending_actions
+        if not self.entered and self.trade_call.trigger_range is not None:
+            try:
+                return self._try_range_entry(price)
+            finally:
+                self.previous_price = price
         if self.previous_price is None:
             self.previous_price = price
             return []
@@ -801,33 +939,11 @@ class BreakoutTrader:
         previous = self.previous_price
         actions: list[OrderAction] = []
         if not self.entered:
-            trigger_range = self.trade_call.trigger_range
-            crossed_trigger_range = bool(
-                trigger_range and previous <= trigger_range[1] < price
-            )
             crossed_buy_above = (
                 self.trade_call.buy_above is not None
                 and previous <= self.trade_call.buy_above < price
             )
-            if crossed_trigger_range:
-                reason = "trigger range crossed"
-                raw_buffer = max(1.0, 0.5 * (current_atr or 0.0))
-                max_buffer = price * 0.02
-                slippage_buffer = min(raw_buffer, max_buffer)
-                limit_price = price + slippage_buffer
-                print(
-                    f"ENTRY PRICING: LTP={price:g} ATR_1m="
-                    f"{current_atr if current_atr is not None else 0:g} "
-                    f"buffer={slippage_buffer:g} limit={limit_price:g}"
-                )
-                self._size_entry(limit_price)
-                self.executor.limit_order(
-                    self.symbol, self.quantity, 1, limit_price, reason
-                )
-                self.entered = True
-                self.remaining_quantity = self.quantity
-                actions.append(OrderAction(reason, self.quantity, 1, limit_price))
-            elif crossed_buy_above:
+            if crossed_buy_above:
                 reason = "buy-above crossed"
                 self._size_entry(price)
                 self.executor.market_order(self.symbol, self.quantity, 1, reason)
@@ -1061,7 +1177,9 @@ def _run_standalone(args: argparse.Namespace, trade_call: TradeCall,
     )
     stream = FyersMarketDataSocket(client_id, access_token)
     stream.subscribe([symbol])
-    print("Waiting for WebSocket ticks and a confirmed upward cross; no order is placed on the first tick.")
+    print("Waiting for an eligible range ask; the first tick may enter."
+          if trade_call.trigger_range else
+          "Waiting for WebSocket ticks and a confirmed upward cross; no order is placed on the first tick.")
     try:
         while not trader.closed:
             trader.poll_orders()

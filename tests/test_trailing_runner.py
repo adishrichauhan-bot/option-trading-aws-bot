@@ -65,7 +65,8 @@ class TrailingRunnerTests(unittest.TestCase):
 
     def test_range_entry_delayed_fill_above_target_does_not_miss_target(self):
         # Price-level target checks, rather than another cross, are necessary after fill confirmation.
-        self.trader.trade_call = replace(self.trader.trade_call, trigger_range=(100, 101))
+        self.trader.trade_call = replace(self.trader.trade_call, trigger_range=(99, 101))
+        self.trader.on_price(99, timestamp=1000)
         self.trader.on_price(100, timestamp=1000)
         self.trader.on_price(102.5, timestamp=1000)
         self.trader.on_price(102.6, timestamp=1000)

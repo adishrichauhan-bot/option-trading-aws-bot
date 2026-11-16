@@ -86,19 +86,20 @@ class EntrySizingTests(unittest.TestCase):
         self.assertEqual(trader.remaining_quantity, 50)
         client.funds.assert_called_once()
 
-    def test_funds_queried_only_at_trigger_and_limit_price_used(self):
+    def test_range_funds_queried_only_at_eligible_ask_and_limit_price_used(self):
         from dataclasses import replace
         client = Mock()
         client.funds.return_value = funds(10000)
         with patch.dict("os.environ", {"FYERS_FUNDS_RESERVE": "0", "FYERS_MAX_QUANTITY": "10000"}):
             sizer = FundsSizer(client, ContractSpec("NSE:TEST", 10), rounding="floor")
-        call = replace(make_call(), trigger_range=(100, 101))
+        call = replace(make_call(), trigger_range=(100, 110), buy_above=110,
+                       targets=(130, 140, 150), stoploss=90)
         trader = BreakoutTrader(call, "NSE:TEST", 10, 10, FyersOrderExecutor(None), entry_sizer=sizer)
-        trader.on_price(100)
+        trader.on_price(99)
         client.funds.assert_not_called()
         trader.on_price(102)
         client.funds.assert_called_once()
-        self.assertEqual(sizer.last_result["entry_price"], 103)
+        self.assertEqual(sizer.last_result["entry_price"], 102)
         self.assertEqual(trader.quantity, 90)
         self.assertEqual(trader.remaining_quantity, 90)
         self.assertEqual(trader.target_quantities, (40, 20, 30))

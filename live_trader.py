@@ -209,7 +209,7 @@ def run_trade(
         "buy_above": signal.buy_above,
         "targets": signal.targets,
         "stoploss": signal.stoploss,
-        "quantity": quantity if args.mock_market else "calculated from fresh funds at breakout",
+        "quantity": quantity if args.mock_market else "calculated from fresh funds at entry",
         "lot_size": lot_size,
         "mode": mode,
     }, indent=2, default=str))
@@ -248,6 +248,9 @@ def run_trade(
             "symbol": symbol,
             "remaining_quantity": trader.remaining_quantity,
             "confirmed_entry_quantity": trader.confirmed_entry_quantity,
+            "entry_cap": trader.entry_cap,
+            "entry_min_rr": trader.entry_min_rr,
+            "entry_stop_reason": trader.entry_stop_reason,
             "active_stoploss": trader.active_stoploss,
             "trailing": trader.trailing,
             "lot_size": lot_size,
@@ -256,7 +259,8 @@ def run_trade(
             "orders": [
                 {"id": order.response.get("id"), "side": order.side, "quantity": order.quantity,
                  "filled_quantity": order.applied_fill, "reason": order.reason,
-                 "cancel_requested": order.cancel_requested, "status": order.status}
+                 "cancel_requested": order.cancel_requested, "status": order.status,
+                 "limit_price": order.limit_price}
                 for order in trader.order_history
             ],
         }
@@ -266,11 +270,9 @@ def run_trade(
             except Exception as exc:
                 raise BrokerStateError(f"Cannot persist broker lifecycle state: {exc}") from exc
             journal_snapshot = snapshot
-    print(
-        "Waiting for mock breakout ticks."
-        if args.mock_market
-        else "Waiting for a WebSocket breakout tick. Press Ctrl+C to stop monitoring."
-    )
+    print("Waiting for an eligible buying-range ask; the first tick may enter."
+          if signal.trigger_range else
+          "Waiting for a breakout tick. Press Ctrl+C to stop monitoring.")
 
     try:
         while not trader.closed:
