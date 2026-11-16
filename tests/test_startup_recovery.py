@@ -163,6 +163,18 @@ class StartupRecoveryTests(unittest.TestCase):
                 pass
         self.assertEqual(self.registry.unresolved_trade_ids(), [trade_id])
 
+    def test_reconciliation_cli_authenticates_and_acknowledges_without_execution(self):
+        import reconcile_journal
+        self.registry.create({})
+        with (patch.dict(os.environ, {'TRADE_REGISTRY_PATH': self.registry.path}),
+              patch.object(sys, 'argv', ['reconcile_journal.py', '--confirm-flat', '--note', 'Reviewed']),
+              patch.object(reconcile_journal, 'authenticated_client', return_value=self.client),
+              patch('startup_recovery.Path.home', return_value=self.root),
+              redirect_stdout(StringIO())):
+            reconcile_journal.main()
+        with self.session():
+            pass
+
     def test_closed_label_with_exposure_or_nonterminal_order_is_not_proof(self):
         trade_id = self.registry.create({})
         for fields in ({'remaining_quantity': 20, 'orders': []},

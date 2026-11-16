@@ -2,7 +2,7 @@
 import argparse
 import os
 
-from auth import authenticated_client
+from trading import authenticated_client
 from startup_recovery import startup_session
 from trade_lifecycle import TradeRegistry
 
