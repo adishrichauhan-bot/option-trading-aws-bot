@@ -276,13 +276,12 @@ unresolved exposure and does not restore management of an old position.
   timestamp. Paper mode uses its simulated tick as the ask. Expensive quotes
   wait for a return into the eligible zone; there is no buffered breakout buy
   or adaptive upward repricing.
-- Range entries have **no time-based expiry**. The former
-  `FYERS_ENTRY_TTL_SECONDS` setting is ignored, even if retained in an existing
-  `.env`. The risk/reward ceiling above remains in force. Pending range entries
-  cancel their unfilled remainder on stale price updates (default 5 seconds via
+- `FYERS_ENTRY_TTL_SECONDS` defaults to 60 seconds from trade setup, covering
+  both waiting and an unfilled range order. Pending range entries cancel their
+  unfilled remainder on expiry, stale price updates (default 5 seconds via
   `FYERS_ENTRY_MAX_QUOTE_AGE_SECONDS`), SL/T1 invalidation, cancellation, or an
   invalidating amendment. Cancel confirmation and final fills are reconciled
-  before managing any partial position; cancellation does not liquidate a fill.
+  before managing any partial position; an expiry does not liquidate a fill.
 - Exact-symbol `minLotSize` and fresh Available Balance determine whole-lot size
   at entry. The budget is the lower of 50% of available balance and the balance
   after reserve. Floor is the default and quantity is
