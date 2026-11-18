@@ -127,15 +127,15 @@ class StartupRecoveryTests(unittest.TestCase):
         with self.session():
             pass
 
-    def test_legacy_unresolved_rows_are_preserved_and_block_even_if_broker_flat(self):
+    def test_legacy_unresolved_rows_are_preserved_and_do_not_block_broker_flatness(self):
         trade_id = self.registry.create({'instrument': 'FAKE'})
         self.registry.update(trade_id, 'RECONCILIATION_REQUIRED', remaining_quantity=20)
         before = self.registry.get(trade_id)
         for _ in range(2):
-            with self.assertRaisesRegex(RecoveryRequired, 'UNRESOLVED_JOURNAL'):
-                with self.session():
-                    self.fail('legacy exposure admitted')
+            with self.session():
+                pass
         self.assertEqual(self.registry.get(trade_id), before)
+        self.assertEqual(self.registry.unresolved_trade_ids('TEST123'), [trade_id])
 
     def test_operator_reconciliation_preserves_rows_and_is_account_and_snapshot_bound(self):
         trade_id = self.registry.create({})
@@ -146,14 +146,10 @@ class StartupRecoveryTests(unittest.TestCase):
         with self.session():
             pass
         self.client.get_profile.return_value['data']['fy_id'] = 'OTHER123'
-        with self.assertRaisesRegex(RecoveryRequired, 'UNRESOLVED_JOURNAL'):
-            with self.session():
-                pass
+        self.assertEqual(self.registry.unresolved_trade_ids('OTHER123'), [trade_id])
         self.client.get_profile.return_value['data']['fy_id'] = 'TEST123'
         self.registry.update(trade_id, 'ACTIVE', remaining_quantity=20)
-        with self.assertRaisesRegex(RecoveryRequired, 'UNRESOLVED_JOURNAL'):
-            with self.session():
-                pass
+        self.assertEqual(self.registry.unresolved_trade_ids('TEST123'), [trade_id])
 
     def test_operator_confirmation_cannot_override_broker_exposure(self):
         trade_id = self.registry.create({})
@@ -175,14 +171,14 @@ class StartupRecoveryTests(unittest.TestCase):
         with self.session():
             pass
 
-    def test_closed_label_with_exposure_or_nonterminal_order_is_not_proof(self):
+    def test_closed_label_with_exposure_or_nonterminal_order_stays_unresolved_in_journal(self):
         trade_id = self.registry.create({})
         for fields in ({'remaining_quantity': 20, 'orders': []},
                        {'remaining_quantity': 0, 'orders': [{'status': 'PENDING'}]}):
             self.registry.update(trade_id, 'CLOSED', **fields)
-            with self.assertRaisesRegex(RecoveryRequired, 'UNRESOLVED_JOURNAL'):
-                with self.session():
-                    self.fail('false closed admitted')
+            self.assertEqual(self.registry.unresolved_trade_ids('TEST123'), [trade_id])
+            with self.session():
+                pass
 
     def test_record_failure_prevents_readiness_and_releases_lock(self):
         self.registry.record_startup = Mock(side_effect=OSError('PRIVATE'))

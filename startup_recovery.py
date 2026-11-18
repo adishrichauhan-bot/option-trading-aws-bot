@@ -141,6 +141,7 @@ def startup_session(client: Any, registry: Any, *, lock_directory: Path | None =
                         _integer(overall.get('count_open')) != open_positions or
                         _integer(overall.get('count_total')) != len(positions)):
                     raise RecoveryRequired('INCONSISTENT_POSITION_TOTALS')
+            # Legacy snapshots belong in the audit. Fresh broker reads establish exposure.
             try:
                 unresolved = registry.unresolved_trade_ids(owner.account_key)
             except Exception:
@@ -158,8 +159,6 @@ def startup_session(client: Any, registry: Any, *, lock_directory: Path | None =
                     observations['operator_reconciled_count'] = observations['unresolved_count'] - len(unresolved)
                 except Exception:
                     raise RecoveryRequired('RECOVERY_STORE_FAILED') from None
-            if unresolved:
-                raise RecoveryRequired('UNRESOLVED_JOURNAL')
         except RecoveryRequired as exc:
             reason = str(exc)
         try:

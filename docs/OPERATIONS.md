@@ -229,11 +229,17 @@ Telegram/listening messages.
 | Reason | Meaning |
 | --- | --- |
 | `OPEN_ORDERS` / `OPEN_POSITIONS` | Existing broker orders/exposure; nothing is adopted or liquidated |
-| `UNRESOLVED_JOURNAL` | Local legacy evidence is not conclusively terminal/flat |
 | `OWNERSHIP_UNAVAILABLE` | Another local owner or lock/storage access problem |
 | Broker read/identity/schema errors | Usable successful account evidence was not obtained |
 | `RECOVERY_STORE_FAILED` | Startup decision cannot be persisted |
 | Friday trade off warning | Friday startup or new entry refused before broker dispatch |
+
+Startup uses fresh FYERS orders, trades and positions to establish current
+exposure. Unresolved local snapshots remain in the journal for investigation,
+and the startup audit records their count. A broker-flat account can start
+with unresolved snapshots. The account lock and durable startup audit still
+apply. Broker reads are sequential, so they reflect the account as observed
+during the check.
 
 Check the reason; authentication is not the answer to every refusal. Do not
 delete/edit journal or lock files to bypass it. OS ownership releases on death;
