@@ -22,11 +22,13 @@ class BrokerLifecycleTests(unittest.TestCase):
         # buying-range price eligibility, which has its own quote-based tests.
         self.trader = BreakoutTrader(make_call(), "NSE:TEST", 100, 10, self.executor)
 
-    def state(self, order_id, status, filled):
+    def state(self, order_id, status, filled, *, traded_price=None):
         self.rows[order_id] = {"id": order_id, "status": status, "filledQty": filled}
+        if traded_price is not None:
+            self.rows[order_id]["tradedPrice"] = traded_price
 
-    def enter(self):
-        self.state("O1", 2, 100)
+    def enter(self, *, traded_price=None):
+        self.state("O1", 2, 100, traded_price=traded_price)
         self.trader.on_price(100)
         self.trader.on_price(101.5)
         self.trader.poll_orders()
@@ -66,6 +68,42 @@ class BrokerLifecycleTests(unittest.TestCase):
         self.assertTrue(self.trader.closed)
         self.assertFalse(self.trader.entered)
         self.assertEqual(self.trader.remaining_quantity, 0)
+
+    def test_exact_targets_use_broker_fill_price_then_prior_targets(self):
+        self.enter(traded_price=101.2)
+        self.trader.on_price(102)
+        self.assertEqual(self.trader.active_stoploss, 101.2)
+
+        self.state("O2", 2, 50)
+        self.trader.on_price(103)
+        self.assertEqual(self.trader.active_stoploss, 102)
+        self.assertFalse(self.trader.trailing)
+
+        self.state("O3", 2, 30)
+        self.trader.on_price(104)
+        self.assertEqual(self.trader.active_stoploss, 103)
+        self.assertTrue(self.trader.trailing)
+        self.assertEqual(self.trader.remaining_quantity, 20)
+        self.assertEqual(self.client.place_order.call_count, 3)
+
+    def test_t1_without_broker_fill_price_keeps_existing_stop(self):
+        self.enter()
+        self.trader.on_price(102)
+        self.assertEqual(self.trader.active_stoploss, 98)
+        self.assertEqual(self.client.place_order.call_args.args[0]["qty"], 50)
+
+    def test_late_fills_update_t1_stop_using_cumulative_broker_average(self):
+        self.state("O1", 6, 30, traded_price=101.1)
+        self.trader.on_price(100)
+        self.trader.on_price(101.5)
+        self.trader.on_price(102)
+        self.assertEqual(self.trader.active_stoploss, 101.1)
+        self.client.cancel_order.assert_called_once_with(data={"id": "O1"})
+
+        self.state("O1", 1, 40, traded_price=101.45)
+        self.trader.poll_orders()
+        self.assertEqual(self.trader.active_stoploss, 101.45)
+        self.assertEqual(self.trader.remaining_quantity, 40)
 
     def test_partial_target_exit_keeps_actual_remainder_and_does_not_close_trade(self):
         self.enter()
@@ -156,7 +194,7 @@ class BrokerLifecycleTests(unittest.TestCase):
         self.enter()
         self.state("O2", 6, 20)
         self.trader.on_price(105)
-        self.assertEqual(self.trader.active_stoploss, 104)
+        self.assertEqual(self.trader.active_stoploss, 103)
         self.assertTrue(self.trader.trailing)
         self.trader.on_price(120)
         self.assertAlmostEqual(self.trader.active_stoploss, 116.4)

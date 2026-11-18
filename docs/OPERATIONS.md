@@ -284,9 +284,12 @@ unresolved exposure and does not restore management of an old position.
   fill deltas change exposure. Duplicate observations do not add twice;
   malformed fill quantities are rejected.
 - T1/T2 book approximately 50%/30% of confirmed entry, rounded down to whole
-  lots. Small sizes can allocate zero to either. Strict crossings advance SL.
-  T3 retains the remainder and activates the runner with a T3 floor.
-- On new highs, runner SL is `max(previous_SL, T3, high - gap)`, where
+  lots. Small sizes can allocate zero to either. At or above T1, active SL
+  moves to the average executed buy price when available. At or above T2 it
+  moves to T1. At or above T3 it moves to T2 and trailing starts on the
+  remaining position. Automatic adjustments preserve any higher active SL.
+- The price that reaches T3 sets the first high watermark. On subsequent new
+  highs, runner SL is `max(previous_SL, high - gap)`, where
   `gap = max(high * trailing_percent / 100, ATR * trailing_ATR_multiple)`.
   Defaults are 3% and 2x ATR; SL never lowers after trailing starts.
 - At/below SL, a local limit sell is placed 0.1% below SL, tick-rounded down.

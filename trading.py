@@ -186,6 +186,7 @@ class OrderState:
     order_id: str
     status: str
     filled_quantity: int
+    average_fill_price: float | None = None
 
     @property
     def terminal(self) -> bool:
@@ -314,7 +315,17 @@ class FyersOrderExecutor:
                 raise ValueError("filledQty must be an exact integer")
             if not 0 <= filled <= quantity or (status == "FILLED" and filled != quantity):
                 raise ValueError(f"inconsistent filledQty: {row}")
-            state = OrderState(order_id, status, filled)
+            average_fill_price = None
+            raw_price = row.get("tradedPrice")
+            if filled and type(raw_price) in (int, float, str):
+                try:
+                    price = float(raw_price)
+                except (ValueError, OverflowError):
+                    pass
+                else:
+                    if math.isfinite(price) and price > 0:
+                        average_fill_price = price
+            state = OrderState(order_id, status, filled, average_fill_price)
         except Exception as exc:
             raise BrokerStateError(f"Cannot reconcile order {order_id}: {exc}") from exc
         self._states[order_id] = (time.monotonic(), state)
@@ -513,6 +524,7 @@ class BreakoutTrader:
         self.exit_order: TrackedOrder | None = None
         self.order_history: list[TrackedOrder] = []
         self.confirmed_entry_quantity = 0
+        self.entry_fill_price: float | None = None
         self.exit_requested: str | None = None
         self.trailing = False
         self.high_watermark: float | None = None
@@ -542,6 +554,26 @@ class BreakoutTrader:
     def confirms_orders(self) -> bool:
         return callable(getattr(self.executor, "order_state", None))
 
+    def _advance_targets(self, price: float) -> list[int]:
+        targets = self.trade_call.targets
+        stop_levels = (self.entry_fill_price, targets[0], targets[1])
+        reached = []
+        for index, target in enumerate(targets):
+            if price < target:
+                break
+            if index in self.targets_hit:
+                continue
+            self.targets_hit.add(index)
+            reached.append(index)
+            stop_level = stop_levels[index]
+            if stop_level is not None:
+                self.active_stoploss = max(self.active_stoploss, stop_level)
+            if index == 2:
+                self.trailing = True
+                self.high_watermark = price
+                print(f"T3 reached: retaining runner, trailing SL={self.active_stoploss:g}")
+        return reached
+
     def _update_trailing_stop(self, price: float) -> None:
         if not self.trailing:
             return
@@ -550,7 +582,7 @@ class BreakoutTrader:
             return
         self.high_watermark = price
         gap = max(price * self.trailing_percent, (self.atr.value or 0) * self.trailing_atr_multiple)
-        self.active_stoploss = max(self.active_stoploss, self.trade_call.targets[2], price - gap)
+        self.active_stoploss = max(self.active_stoploss, price - gap)
 
     def _apply_order_state(self, order: TrackedOrder) -> OrderState:
         state = self.executor.order_state(order.response, order.quantity)
@@ -565,6 +597,14 @@ class BreakoutTrader:
         if order.side == 1:
             self.confirmed_entry_quantity += delta
             self.entered = self.confirmed_entry_quantity > 0
+            fill_price = state.average_fill_price
+            if fill_price is None and delta and not getattr(self.executor, "live", True):
+                fill_price = order.limit_price or self.last_quote_price
+            # The final buy fill can revise the cost after T1 requests cancellation.
+            if fill_price is not None and fill_price != self.entry_fill_price and self.targets_hit == {0}:
+                self.active_stoploss = max(self.active_stoploss, fill_price)
+            if fill_price is not None or delta:
+                self.entry_fill_price = fill_price
         return state
 
     def _cancel_tracked(self, order: TrackedOrder) -> None:
@@ -641,20 +681,12 @@ class BreakoutTrader:
         )
         if self.entered and managing_targets:
             # Observe all crossed levels even while a target sale is partially filled.
-            for index, target in enumerate(self.trade_call.targets):
-                if index in self.targets_hit or price <= target:
-                    continue
-                self.targets_hit.add(index)
-                self.active_stoploss = max(self.active_stoploss, target)
-                if index == 2:
-                    self.trailing = True
-                    self.high_watermark = None
-                    print(f"T3 crossed: retaining runner; trailing SL={self.active_stoploss:g}")
+            self._advance_targets(price)
             self._update_trailing_stop(price)
         emergency = price <= self.active_stoploss * 0.98
         if self.entry_order is not None:
             # Cancel the unfilled buy remainder before any sell; reconcile cancellation races first.
-            if price <= self.active_stoploss or (self.entered and price > self.trade_call.targets[0]):
+            if price <= self.active_stoploss or (self.entered and price >= self.trade_call.targets[0]):
                 self._cancel_tracked(self.entry_order)
                 if price <= self.active_stoploss:
                     self.exit_requested = f"stoploss_{self.active_stoploss:g} crossed"
@@ -800,6 +832,7 @@ class BreakoutTrader:
         else:
             self.entered = True
             self.remaining_quantity = self.quantity
+            self.entry_fill_price = limit
         print(f"RANGE ENTRY: ask={ask:g} limit={limit:g} ceiling={self.entry_cap:g} min_RR={self.entry_min_rr:g}", flush=True)
         return [OrderAction(reason, self.quantity, 1, limit)]
 
@@ -949,11 +982,13 @@ class BreakoutTrader:
                 self.executor.market_order(self.symbol, self.quantity, 1, reason)
                 self.entered = True
                 self.remaining_quantity = self.quantity
+                self.entry_fill_price = price
                 actions.append(OrderAction(reason, self.quantity, 1, price))
             self.previous_price = price
             return actions
 
-        if previous >= self.active_stoploss > price:
+        reached = self._advance_targets(price)
+        if price <= self.active_stoploss:
             quantity = self.remaining_quantity
             if quantity:
                 reason = f"stoploss_{self.active_stoploss:g} crossed"
@@ -966,19 +1001,10 @@ class BreakoutTrader:
             self.previous_price = price
             return actions
 
-        for index, target in enumerate(self.trade_call.targets):
-            if index in self.targets_hit or not previous <= target < price:
+        for index in reached:
+            if index == 2:
                 continue
             quantity = min(self.target_quantities[index], self.remaining_quantity)
-            self.targets_hit.add(index)
-            if index == 2:
-                self.active_stoploss = max(self.active_stoploss, target)
-                self.trailing = True
-                self.high_watermark = None
-                self._update_trailing_stop(price)
-                continue
-            if index in {0, 1}:
-                self.active_stoploss = target
             if quantity:
                 exit_action = self._exit_order(quantity, f"target_{index + 1} crossed", price)
                 if exit_action is not None:

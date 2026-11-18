@@ -17,12 +17,26 @@ class TrailingRunnerTests(unittest.TestCase):
         for price in (100, 101.5, 102.5, 103.5, 104.5):
             self.trader.on_price(price, timestamp=1000)
 
-    def test_t3_retains_runner_and_starts_stop_at_t3(self):
-        self.reach_t3()
+    def test_exact_target_touches_advance_stop_and_retain_runner(self):
+        self.trader.on_price(100, timestamp=1000)
+        self.trader.on_price(101.5, timestamp=1000)
+        self.assertEqual(self.trader.active_stoploss, 98)
+
+        self.trader.on_price(102, timestamp=1000)
+        self.assertEqual(self.trader.active_stoploss, 101.5)
+        self.assertEqual(self.trader.remaining_quantity, 50)
+        self.assertFalse(self.trader.trailing)
+
+        self.trader.on_price(103, timestamp=1000)
+        self.assertEqual(self.trader.active_stoploss, 102)
+        self.assertEqual(self.trader.remaining_quantity, 20)
+        self.assertFalse(self.trader.trailing)
+
+        self.trader.on_price(104, timestamp=1000)
         self.assertTrue(self.trader.trailing)
         self.assertFalse(self.trader.closed)
         self.assertEqual(self.trader.remaining_quantity, 20)
-        self.assertEqual(self.trader.active_stoploss, 104)
+        self.assertEqual(self.trader.active_stoploss, 103)
         self.assertEqual([order.quantity for order in self.trader.order_history], [100, 50, 30])
 
     def test_new_high_raises_stop_and_retracement_does_not_lower_it(self):
@@ -66,10 +80,11 @@ class TrailingRunnerTests(unittest.TestCase):
     def test_range_entry_delayed_fill_above_target_does_not_miss_target(self):
         # Price-level target checks, rather than another cross, are necessary after fill confirmation.
         self.trader.trade_call = replace(self.trader.trade_call, trigger_range=(99, 101))
-        self.trader.on_price(99, timestamp=1000)
+        self.trader.on_price(99.02, timestamp=1000)
         self.trader.on_price(100, timestamp=1000)
         self.trader.on_price(102.5, timestamp=1000)
         self.trader.on_price(102.6, timestamp=1000)
+        self.assertEqual(self.trader.active_stoploss, 99.05)
         self.assertEqual(self.trader.remaining_quantity, 50)
 
     def test_manual_command_cannot_lower_a_runner_stop(self):
@@ -79,12 +94,28 @@ class TrailingRunnerTests(unittest.TestCase):
             self.trader.modify_stoploss(110)
         self.assertAlmostEqual(self.trader.active_stoploss, 116.4)
 
-    def test_jump_straight_above_t3_protects_jump_gain_before_retracement(self):
-        for price in (100, 101.5, 120):
+    def test_t3_and_later_high_preserve_a_tighter_stop(self):
+        for price in (100, 101.5, 102, 103.75):
+            self.trader.on_price(price, timestamp=1000)
+        self.trader.modify_stoploss(103.5)
+
+        self.trader.on_price(104, timestamp=1000)
+        self.assertTrue(self.trader.trailing)
+        self.assertEqual(self.trader.active_stoploss, 103.5)
+        self.trader.on_price(105, timestamp=1000)
+        self.assertEqual(self.trader.active_stoploss, 103.5)
+
+    def test_jump_above_t3_starts_at_t2_and_trails_on_a_later_high(self):
+        for price in (100, 101.5, 119):
             self.trader.on_price(price, timestamp=1000)
         self.assertTrue(self.trader.trailing)
-        self.assertAlmostEqual(self.trader.active_stoploss, 116.4)
+        self.assertEqual(self.trader.active_stoploss, 103)
         self.assertEqual(self.trader.remaining_quantity, 20)
+        self.trader.on_price(110, timestamp=1000)
+        self.assertFalse(self.trader.closed)
+        self.assertEqual(self.trader.active_stoploss, 103)
+        self.trader.on_price(120, timestamp=1000)
+        self.assertAlmostEqual(self.trader.active_stoploss, 116.4)
         self.trader.on_price(110, timestamp=1000)
         self.assertTrue(self.trader.closed)
 
