@@ -70,7 +70,8 @@ def available_balance(response: Any, symbol: str) -> Decimal:
 
 def calculate_quantity(funds: Any, price: Any, lot_size: int, *, max_quantity: int = 10000,
                        reserve: Any = 0, rounding: str = "floor") -> int:
-    budget = number(funds, "available funds") - number(reserve, "funds reserve")
+    available = number(funds, "available funds")
+    budget = min(available / 2, available - number(reserve, "funds reserve"))
     unit_price = number(price, "entry price", positive=True)
     lot_size = positive_integer(lot_size, "lot size")
     max_quantity = positive_integer(max_quantity, "maximum quantity")

@@ -29,7 +29,7 @@ class AfternoonSizingRegressionTests(unittest.TestCase):
         return trader, sizer
 
     def test_default_floor_preserves_affordable_trades_with_fractional_lot_budgets(self):
-        self.assertEqual(calculate_quantity(10000, 94, 20), 100)
+        self.assertEqual(calculate_quantity(10000, 94, 20), 40)
         with self.assertRaises(SizingError):
             calculate_quantity(10000, 94, 20, rounding="ceil")
 
@@ -52,7 +52,7 @@ class AfternoonSizingRegressionTests(unittest.TestCase):
                 self.assertTrue(trader.entered)
                 self.assertGreater(trader.remaining_quantity, 0)
                 self.assertEqual(trader.remaining_quantity % 20, 0)
-                self.assertLessEqual(float(sizer.last_result["estimated_premium"]), 10000)
+                self.assertLessEqual(float(sizer.last_result["estimated_premium"]), 5000)
                 self.assertEqual(sizer.last_result["rounding"], "floor")
                 self.assertEqual(len(trader.order_history), 1)
 

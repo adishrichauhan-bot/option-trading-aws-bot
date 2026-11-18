@@ -16,14 +16,14 @@ def funds(amount, commodity=0):
 
 class QuantityCalculationTests(unittest.TestCase):
     def test_floor_is_affordable_and_a_whole_lot(self):
-        self.assertEqual(calculate_quantity(10000, 120, 25, rounding="floor"), 75)
+        self.assertEqual(calculate_quantity(10000, 120, 25, rounding="floor"), 25)
 
     def test_ceiling_rule_rejects_unaffordable_result(self):
         with self.assertRaisesRegex(SizingError, "Ceiling"):
             calculate_quantity(10000, 120, 25, rounding="ceil")
 
     def test_ceiling_exact_whole_lots_can_trade(self):
-        self.assertEqual(calculate_quantity(9000, 120, 25, rounding="ceil"), 75)
+        self.assertEqual(calculate_quantity(18000, 120, 25, rounding="ceil"), 75)
 
     def test_not_even_one_lot_skips(self):
         with self.assertRaises(SizingError):
@@ -33,10 +33,11 @@ class QuantityCalculationTests(unittest.TestCase):
         self.assertEqual(calculate_quantity(100000, 100, 65, max_quantity=200), 195)
 
     def test_reserve_reduces_usable_budget(self):
-        self.assertEqual(calculate_quantity(10000, 100, 20, reserve=2500, rounding="floor"), 60)
+        self.assertEqual(calculate_quantity(10000, 100, 20, reserve=2500), 40)
+        self.assertEqual(calculate_quantity(10000, 100, 20, reserve=7000), 20)
 
     def test_decimal_boundary_does_not_lose_a_lot(self):
-        self.assertEqual(calculate_quantity("0.30", "0.10", 1), 3)
+        self.assertEqual(calculate_quantity("0.60", "0.10", 1), 3)
 
     def test_invalid_inputs_fail_closed(self):
         for amount, price, lot in [("NaN", 10, 20), (1000, "Infinity", 20), (1000, 0, 20),
@@ -81,9 +82,9 @@ class EntrySizingTests(unittest.TestCase):
         trader.on_price(100)
         trader.on_price(102)
         self.assertEqual(sizer.last_result["entry_price"], 102)
-        self.assertEqual(trader.order_history[0].quantity, 100)
+        self.assertEqual(trader.order_history[0].quantity, 50)
         trader.on_price(102.5)
-        self.assertEqual(trader.remaining_quantity, 50)
+        self.assertEqual(trader.remaining_quantity, 30)
         client.funds.assert_called_once()
 
     def test_range_funds_queried_only_at_eligible_ask_and_limit_price_used(self):
@@ -100,17 +101,17 @@ class EntrySizingTests(unittest.TestCase):
         trader.on_price(102)
         client.funds.assert_called_once()
         self.assertEqual(sizer.last_result["entry_price"], 102)
-        self.assertEqual(trader.quantity, 90)
-        self.assertEqual(trader.remaining_quantity, 90)
-        self.assertEqual(trader.target_quantities, (40, 20, 30))
+        self.assertEqual(trader.quantity, 40)
+        self.assertEqual(trader.remaining_quantity, 40)
+        self.assertEqual(trader.target_quantities, (20, 10, 10))
 
     def test_each_new_trade_rechecks_changed_funds_and_market_price(self):
         client = Mock()
         client.funds.side_effect = [funds(10200), funds(5100)]
         with patch.dict("os.environ", {"FYERS_FUNDS_RESERVE": "0", "FYERS_MAX_QUANTITY": "10000"}):
             sizer = FundsSizer(client, ContractSpec("NSE:TEST", 10), rounding="floor")
-        self.assertEqual(sizer(102), 100)
         self.assertEqual(sizer(102), 50)
+        self.assertEqual(sizer(102), 20)
         self.assertEqual(client.funds.call_count, 2)
 
     def test_funds_failure_or_insufficient_budget_submits_no_entry(self):
