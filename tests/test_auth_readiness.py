@@ -1,3 +1,9 @@
+
+import getpass
+import os
+import warnings
+from contextlib import redirect_stdout
+from io import StringIO
 import unittest
 import sys
 from contextlib import nullcontext
@@ -106,3 +112,55 @@ class ListenerReadinessTests(unittest.TestCase):
             live_trader.main()
         self.assertEqual(run.call_count, 1)
         self.assertEqual(registry.return_value.update.call_args.args[1], "AUTH_REQUIRED")
+
+
+class AuthRedactionTests(unittest.TestCase):
+    def test_hidden_input_refuses_echo_fallback_without_a_tty(self):
+        def unavailable(prompt):
+            warnings.warn('Cannot disable echo', getpass.GetPassWarning)
+            self.fail('must not continue to echo fallback')
+        with patch('getpass.getpass', side_effect=unavailable), redirect_stdout(StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'interactive terminal'):
+                auth.manual_auth_code('https://example.invalid/login', 'state')
+
+    def test_manual_code_uses_non_echo_input(self):
+        with (patch('getpass.getpass', return_value='PRIVATE_CODE') as hidden,
+              patch('builtins.input', side_effect=AssertionError('echo input forbidden')),
+              redirect_stdout(StringIO()) as output):
+            self.assertEqual(auth.manual_auth_code('https://example.invalid/login', 'state'), 'PRIVATE_CODE')
+        hidden.assert_called_once()
+        self.assertNotIn('PRIVATE_CODE', output.getvalue())
+
+    def test_redirect_error_does_not_forward_external_description(self):
+        with self.assertRaises(RuntimeError) as caught:
+            auth.extract_auth_code('https://example.invalid/?error=bad&description=PRIVATE_CODE', 'state')
+        self.assertNotIn('PRIVATE_CODE', str(caught.exception))
+
+    def test_exchange_failure_does_not_forward_response_or_transport(self):
+        session = Mock()
+        for result in ({'s': 'error', 'message': 'PRIVATE_CODE'}, None):
+            session.generate_token.return_value = result
+            with self.assertRaises(RuntimeError) as caught:
+                auth.exchange_auth_code(session, 'fake')
+            self.assertNotIn('PRIVATE_CODE', str(caught.exception))
+        session.generate_token.side_effect = RuntimeError('PRIVATE_CODE')
+        with self.assertRaises(RuntimeError) as caught:
+            auth.exchange_auth_code(session, 'fake')
+        self.assertNotIn('PRIVATE_CODE', str(caught.exception))
+
+    def test_interactive_main_never_prints_profile(self):
+        client = Mock()
+        client.get_profile.return_value = {'s': 'ok', 'data': {'email': 'PRIVATE_PROFILE'}}
+        with (patch.dict(os.environ, {'redirect_uri':'fake', 'client_id':'fake', 'secret_key':'fake',
+                                     'grant_type':'fake', 'response_type':'fake', 'state':'fake'}, clear=True),
+              patch.object(auth, 'read_tokens', return_value={'access_token':'fake'}),
+              patch.object(auth, 'access_token_works', return_value=True),
+              patch.object(auth, 'build_client', return_value=client),
+              patch.object(auth.fyersModel, 'SessionModel'),
+              redirect_stdout(StringIO()) as output):
+            self.assertIs(auth.main(), client)
+        self.assertNotIn('PRIVATE_PROFILE', output.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

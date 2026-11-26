@@ -244,6 +244,8 @@ class BrokerLifecycleTests(unittest.TestCase):
         with self.assertRaises(BrokerStateError):
             self.trader.on_price(101.5)
         self.assertFalse(self.trader.entered)
+        self.client.place_order.assert_called_once()
+        self.client.cancel_order.assert_not_called()
 
     def test_pending_market_entry_is_also_not_a_fill(self):
         self.trader.trade_call = make_call()
@@ -278,6 +280,52 @@ class BrokerLifecycleTests(unittest.TestCase):
         self.trader.poll_orders()
         self.assertEqual(self.trader.remaining_quantity, 0)
         self.assertTrue(self.trader.closed)
+
+
+class StrictFillTests(unittest.TestCase):
+    def test_malformed_quantity_is_never_coerced(self):
+        client = Mock()
+        executor = FyersOrderExecutor(client, live=True)
+        for value in (True, False, 1.9, 1.0, None, float('nan'), float('inf'), '1.9', '-1', {}, []):
+            client.orderbook.return_value = {'s': 'ok', 'orderBook': [{'id': 'O1', 'status': 6, 'filledQty': value}]}
+            with self.subTest(value=value), self.assertRaises(BrokerStateError):
+                executor.order_state({'id': 'O1'}, 100, force=True)
+
+    def test_exact_integer_and_compatibility_digit_string_are_supported(self):
+        client = Mock()
+        executor = FyersOrderExecutor(client, live=True)
+        for value in (0, 30, '30'):
+            client.orderbook.return_value = {'s': 'ok', 'orderBook': [{'id': 'O1', 'status': 6, 'filledQty': value}]}
+            self.assertEqual(executor.order_state({'id': 'O1'}, 100, force=True).filled_quantity, int(value))
+
+
+class BrokerResponseValidationTests(unittest.TestCase):
+    def setUp(self):
+        use_monday(self)
+        for target in ('socket.socket.connect', 'socket.create_connection'):
+            guard = patch(target, side_effect=AssertionError('Network forbidden in audit'))
+            guard.start()
+            self.addCleanup(guard.stop)
+        env = patch.dict('os.environ', {'FYERS_ORDER_POLL_SECONDS': '0'})
+        env.start()
+        self.addCleanup(env.stop)
+        self.client = Mock(spec=['place_order', 'orderbook', 'cancel_order'])
+        self.client.place_order.return_value = {'s': 'ok', 'id': 'O1'}
+        self.executor = FyersOrderExecutor(self.client, live=True)
+
+    def observation(self, status, filled):
+        self.client.orderbook.return_value = {'s': 'ok', 'orderBook': [
+            {'id': 'O1', 'status': status, 'filledQty': filled}]}
+
+    def test_missing_order_row_is_uncertain_not_zero_fill(self):
+        self.client.orderbook.return_value = {'s': 'ok', 'orderBook': []}
+        with self.assertRaises(BrokerStateError):
+            self.executor.order_state({'id': 'O1'}, 100)
+
+    def test_unknown_status_is_rejected(self):
+        self.observation(999, 0)
+        with self.assertRaises(BrokerStateError):
+            self.executor.order_state({'id': 'O1'}, 100)
 
 
 if __name__ == "__main__":

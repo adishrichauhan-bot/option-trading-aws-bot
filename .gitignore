@@ -3,3 +3,26 @@ __pycache__/
 *.py[cod]
 .env
 *.tmp
+
+# Local test, lint, and coverage output.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Private credentials, account sessions, and runtime state.
+*.pem
+*.key
+*.session
+*.session-journal
+token.json
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.log

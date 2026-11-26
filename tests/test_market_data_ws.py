@@ -44,5 +44,27 @@ class MarketDataSocketTests(unittest.TestCase):
         stream.close()
 
 
+class MarketDataDeliveryRegressionTests(unittest.TestCase):
+    @unittest.expectedFailure
+    def test_unread_tick_must_be_delivered(self):
+        stream = make_stream()
+        stream._started = True  # Offline fixture: never start the SDK thread.
+        stream.subscribe(['NSE:FAKE'])
+        stream._on_message({'symbol': 'NSE:FAKE', 'ltp': 84})
+        self.assertEqual(stream.wait_for_update('NSE:FAKE', timeout=0.001)['ltp'], 84)
+
+    @unittest.expectedFailure
+    def test_reconnect_must_allow_fresh_tick(self):
+        stream = make_stream()
+        stream._started = True  # Offline fixture: never start the SDK thread.
+        stream.subscribe(['NSE:FAKE'])
+        stream._on_error('synthetic transient failure')
+        stream._on_connect()
+        # Deliver a tick after the consumer establishes its baseline.
+        stream._events['NSE:FAKE'].wait = lambda timeout: stream._on_message(
+            {'symbol': 'NSE:FAKE', 'ltp': 85})
+        self.assertEqual(stream.wait_for_update('NSE:FAKE', timeout=0.1)['ltp'], 85)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,32 @@ Dependencies are declared in [requirements.txt](./requirements.txt). Configurati
 names are documented by [.env.example](./.env.example). Secrets, account sessions,
 token caches, and production databases belong outside versioned documentation.
 
+### Test organization
+
+Tests are maintained by feature, rather than by the date of an investigation:
+
+- [test_telegram_message_routing.py](./tests/test_telegram_message_routing.py)
+  retains split-call, reentry, progress-message, and duplicate-delivery regressions.
+  The replay fixture in [tests/fixtures/](./tests/fixtures/) is still consumed.
+- [test_position_sizing.py](./tests/test_position_sizing.py) includes signal-to-sizing
+  regressions as well as arithmetic and metadata checks.
+- [test_order_lifecycle.py](./tests/test_order_lifecycle.py) includes broker-response
+  validation and strict fill decoding. Duplicate audit scenarios were removed;
+  unique assertions were retained with the corresponding feature.
+- [test_market_data_ws.py](./tests/test_market_data_ws.py) retains both known
+  expected failures for unread updates and reconnect behavior.
+- [test_auth_readiness.py](./tests/test_auth_readiness.py) includes output privacy
+  and hidden-input checks; [test_app.py](./tests/test_app.py) covers API cleanup.
+- The remaining suites cover startup refusal, command handling, range entries,
+  runner behavior, orchestration, and Friday policy. They are regression coverage,
+  not temporary scripts. [run_offline.py](./tests/run_offline.py) and
+  [trading_test_clock.py](./tests/trading_test_clock.py) are shared test infrastructure.
+
+Runtime modules and documented maintenance tools remain in place. A file is not
+dead code merely because it is invoked as a CLI rather than imported. Generated
+caches are disposable; private environment files and the virtual environment are
+preserved. Local cleanup does not remove independently deployed EC2 files.
+
 ## Current implementation and limits
 
 These are descriptions of code, not investment recommendations or approval of

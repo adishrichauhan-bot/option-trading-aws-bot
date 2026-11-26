@@ -245,3 +245,17 @@ For documentation edits, verify the two maintained documents, relative file link
 heading anchors, and whitespace. Application tests are needed when code behavior
 changes, not simply to re-prove an unchanged implementation after prose edits.
 Original pre-consolidation documents remain in Git history at `7afebb9`.
+
+### Repository hygiene
+
+Keep feature-based regression tests even when they originated in an incident or
+review. Remove a case only after checking for equivalent assertions elsewhere;
+preserve unique coverage and expected-failure visibility. Historical source
+modules may be consolidated without removing the scenarios they protect.
+
+The ignore rules exclude generated caches, coverage output, logs, common key and
+session files, token caches, and SQLite runtime files. Ignore rules do not remove
+files already tracked or sanitize existing Git history. Private configuration,
+virtual environments, stashes, and external backups must not be deleted as part
+of routine code cleanup. Do not recursively clean the checkout with ignored files
+included: it can destroy credentials and local state.
