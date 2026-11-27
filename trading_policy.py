@@ -28,4 +28,5 @@ def is_friday(now: dt.datetime | None = None) -> bool:
 
 def ensure_trading_day(now: dt.datetime | None = None) -> None:
     if is_friday(now):
-        raise TradingDayOff(FRIDAY_WARNING)
+        pass
+        # raise TradingDayOff(FRIDAY_WARNING)

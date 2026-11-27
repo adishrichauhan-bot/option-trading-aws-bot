@@ -1,4 +1,13 @@
-﻿# Runbook
+﻿
+ssh -i "C:\Users\prabh\Downloads\aws-asus-option-trad-pem.pem" ec2-user@16.178.185.148
+cd ~/option-trading-aws-bot
+source .venv/bin/activate
+tmux new-session -A -s trader
+python auth.py
+python live_trading.py
+ctrl + b
+d
+# Runbook
 
 Offline validation, read-only troubleshooting, and repository maintenance for
 Option Trading AWS Bot. See [README.md](./README.md) for architecture, current
