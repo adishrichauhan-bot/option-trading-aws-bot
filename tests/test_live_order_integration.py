@@ -22,7 +22,7 @@ class LiveOrderIntegrationTests(unittest.TestCase):
 
     def run_scripted_trade(self, *, reentry=False, awaiting_levels=False, invalid_amendment=False):
         client = Mock()
-        client.funds.return_value = {"s": "ok", "fund_limit": [{"title": "Available Balance", "equityAmount": 20500}]}
+        client.funds.return_value = {"s": "ok", "fund_limit": [{"title": "Available Balance", "equityAmount": 11000}]}
         client.place_order.side_effect = lambda order: {"s": "ok", "id": f"O{client.place_order.call_count}"}
         rows = {"O1": {"id": "O1", "status": 6, "filledQty": 0}}
         client.orderbook.side_effect = lambda data: {"s": "ok", "orderBook": [rows[data["id"]]]}

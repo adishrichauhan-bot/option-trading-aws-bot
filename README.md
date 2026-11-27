@@ -80,7 +80,7 @@ business rules. Offline simulations must be distinguished from broker execution.
   parameter is 1.5. The current range opportunity timeout is 60 seconds; quote-age
   protection is separate. Removed timeout changes remain outside this baseline.
 - Lot size comes from the exact contract. Current sizing budget is the lower of
-  half the available balance and available balance minus reserve. Floor whole-lot
+  95% of the available balance and available balance minus reserve. Floor whole-lot
   rounding is the default; an unaffordable explicit ceiling result is skipped.
   Old examples using the entire available balance are superseded. Estimated
   affordability is not an executed cost, margin approval, or financial result.
